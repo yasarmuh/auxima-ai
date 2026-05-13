@@ -1,0 +1,38 @@
+[project]
+name = "auxima-ai"
+version = "0.1.0"
+description = "Auxima Insure AI sidecar — FastAPI service for the multi-agent CRM. Communicates with the Frappe `auxima` app over REST only. NEVER imports frappe."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Auxilium Tech" }]
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["auxima_ai*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
