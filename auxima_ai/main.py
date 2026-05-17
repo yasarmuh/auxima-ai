@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from auxima_ai import __version__
 from auxima_ai.auth import shared_secret_middleware
 from auxima_ai.config import get_settings
+from auxima_ai.intake.router import router as intake_router
 
 app = FastAPI(
     title="Auxima Insure AI Sidecar",
@@ -29,6 +30,7 @@ app = FastAPI(
 )
 
 app.middleware("http")(shared_secret_middleware)
+app.include_router(intake_router)
 
 
 @app.get("/healthz")
