@@ -13,7 +13,8 @@ from __future__ import annotations
 import hmac
 from typing import Awaitable, Callable
 
-from fastapi import HTTPException, Request, status
+from fastapi import Request, status
+from fastapi.responses import JSONResponse
 
 from auxima_ai.config import get_settings
 
@@ -28,6 +29,12 @@ async def shared_secret_middleware(
 
     The shared_secret MUST be set (non-empty); a sidecar started with an empty secret refuses
     every /v1/* request. That's intentional — we'd rather fail closed than accept "" == "".
+
+    Returns a ``JSONResponse`` directly on failure rather than raising
+    ``HTTPException``; ``BaseHTTPMiddleware`` does not reliably propagate
+    ``HTTPException`` through Starlette's exception middleware across FastAPI
+    versions, and silently leaks 500s in tests. Returning the response keeps
+    the contract identical regardless of the framework version.
     """
     if request.url.path in UNAUTHENTICATED_PATHS:
         return await call_next(request)
@@ -37,15 +44,14 @@ async def shared_secret_middleware(
     provided = (request.headers.get(HEADER_NAME) or "").strip()
 
     if not expected:
-        # Misconfiguration on our side — fail closed.
-        raise HTTPException(
+        return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="sidecar shared_secret is not configured",
+            content={"detail": "sidecar shared_secret is not configured"},
         )
     if not provided or not hmac.compare_digest(expected, provided):
-        raise HTTPException(
+        return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="missing or invalid sidecar token",
+            content={"detail": "missing or invalid sidecar token"},
         )
 
     return await call_next(request)
