@@ -19,7 +19,7 @@ are logged for known-sensitive fields.
 from __future__ import annotations
 
 import re
-from typing import Final
+from typing import Any, Final
 
 # ---------------------------------------------------------------------------
 # Compiled patterns — order matters when a string could match more than one
@@ -105,4 +105,71 @@ def is_clean(text: str) -> bool:
     return not any(pat.search(text) for _kind, pat in _PATTERNS)
 
 
-__all__ = ("redact", "is_clean")
+def redact_json(obj: Any) -> tuple[Any, bool]:
+    """Recursively redact PII inside a JSON-like structure.
+
+    Walks ``dict`` / ``list`` / ``tuple`` containers and applies :func:`redact`
+    to every ``str`` leaf. All other leaf types (``int``, ``float``, ``bool``,
+    ``None``) pass through unchanged. The traversal is purely functional —
+    new containers are constructed; the input is never mutated (matches the
+    repo-wide immutability rule).
+
+    Per S-19 §3.4 + S-34 §3.4: needed by the structured-log emitter and the
+    outbound webhook payload signer. The redactor is applied to the payload
+    *before* HMAC signing so the signature covers the redacted body that
+    actually leaves the boundary.
+
+    Parameters
+    ----------
+    obj :
+        Any JSON-decodable Python value (dict / list / tuple / str / int /
+        float / bool / None) or a nested combination thereof. Tuples are
+        preserved as tuples; lists as lists; dicts as dicts. Dict *keys* are
+        not redacted (they're typically field names, not PII).
+
+    Returns
+    -------
+    (redacted_obj, fired)
+        ``redacted_obj`` is a new structure mirroring the input shape with
+        string leaves replaced where PII matched. ``fired`` is ``True`` iff
+        at least one leaf was modified anywhere in the tree.
+
+    Notes
+    -----
+    - Cycle protection is intentionally **not** implemented — JSON payloads
+      are acyclic by definition; a cyclic input is a programmer error.
+    - Unsupported leaf types (e.g. ``bytes``, custom objects) pass through
+      unchanged. Callers that want strict-mode behaviour should validate
+      the payload shape upstream (Pydantic) before passing it here.
+    """
+    if isinstance(obj, str):
+        return redact(obj)
+    if isinstance(obj, dict):
+        fired = False
+        new_dict: dict[Any, Any] = {}
+        for k, v in obj.items():
+            new_v, v_fired = redact_json(v)
+            new_dict[k] = new_v
+            fired = fired or v_fired
+        return new_dict, fired
+    if isinstance(obj, list):
+        fired = False
+        new_list: list[Any] = []
+        for item in obj:
+            new_item, item_fired = redact_json(item)
+            new_list.append(new_item)
+            fired = fired or item_fired
+        return new_list, fired
+    if isinstance(obj, tuple):
+        fired = False
+        new_items: list[Any] = []
+        for item in obj:
+            new_item, item_fired = redact_json(item)
+            new_items.append(new_item)
+            fired = fired or item_fired
+        return tuple(new_items), fired
+    # int / float / bool / None / unsupported leaf — pass through unchanged.
+    return obj, False
+
+
+__all__ = ("redact", "is_clean", "redact_json")

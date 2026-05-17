@@ -33,24 +33,30 @@ def test_no_static_import_strings_in_source():
 
     Catches the easy class of mistake — code review backstop. Pairs with the dynamic
     runtime check above (which catches __import__/importlib paths).
+
+    Uses word boundaries so that ``from auxima_ai.config import X`` (the sidecar's own
+    package) does NOT collide with the forbidden top-level ``auxima`` (the Frappe app).
     """
     import pathlib
+    import re
 
     pkg_dir = pathlib.Path(__file__).resolve().parent.parent / "auxima_ai"
     violations: list[str] = []
     for py_file in pkg_dir.rglob("*.py"):
         text = py_file.read_text(encoding="utf-8")
         for forbidden in FORBIDDEN_TOP_LEVEL:
-            for needle in (
-                f"import {forbidden}",
-                f"from {forbidden}",
-                f"__import__('{forbidden}'",
-                f'__import__("{forbidden}"',
-                f"importlib.import_module('{forbidden}'",
-                f'importlib.import_module("{forbidden}"',
-            ):
-                if needle in text:
-                    violations.append(f"{py_file}: '{needle}'")
+            # Match the forbidden name as a whole token (followed by space, dot, or
+            # comma — not by another word character that would make it a different
+            # package name like `auxima_ai`).
+            patterns = (
+                rf"\bimport\s+{re.escape(forbidden)}\b(?!_)",
+                rf"\bfrom\s+{re.escape(forbidden)}\b(?!_)",
+                rf"__import__\(\s*['\"]{re.escape(forbidden)}['\"]",
+                rf"importlib\.import_module\(\s*['\"]{re.escape(forbidden)}['\"]",
+            )
+            for pat in patterns:
+                if re.search(pat, text):
+                    violations.append(f"{py_file}: matched /{pat}/")
     assert not violations, "forbidden imports found:\n  " + "\n  ".join(violations)
 
 
