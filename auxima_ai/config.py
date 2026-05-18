@@ -37,6 +37,31 @@ _LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset(
 )
 
 
+def _validate_http_url(v: str, field_name: str) -> str:
+    """Shared validator for any http(s) URL setting.
+
+    Loopback hosts (RFC 6761 §6.3 — ``*.localhost``, ``127.0.0.1``,
+    ``::1``) may use ``http://``; any other host MUST use ``https://``
+    so the secrets / payloads riding on this URL don't go cleartext.
+    """
+    if not isinstance(v, str) or not v.strip():
+        raise ValueError(f"{field_name} must be a non-empty URL")
+    parsed = urlparse(v)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"{field_name} scheme must be http or https; got {parsed.scheme!r}"
+        )
+    if not parsed.netloc:
+        raise ValueError(f"{field_name} missing host: {v!r}")
+    host = (parsed.hostname or "").lower()
+    is_loopback = host in _LOOPBACK_HOSTS or host.endswith(".localhost")
+    if parsed.scheme == "http" and not is_loopback:
+        raise ValueError(
+            f"{field_name} must use https:// for non-loopback hosts; got {v!r}"
+        )
+    return v
+
+
 class Settings(BaseSettings):
     """All config is env-driven. Secrets MUST come from env, never from code."""
 
@@ -61,6 +86,15 @@ class Settings(BaseSettings):
 
     # The LiteLLM router default model alias (e.g. "ollama/qwen2.5:32b").
     default_model: str = "ollama/qwen2.5:32b"
+
+    # Base URL of the Ollama daemon (used by OllamaLLMCaller). Default
+    # matches `ollama serve` listening locally on its standard port.
+    ollama_base_url: str = "http://localhost:11434"
+
+    # Path to the per-tenant policy manifest (tenants.yaml). Optional —
+    # if unset, the sidecar starts with no tenants registered and every
+    # /v1/* call fails UnknownTenantError until policies are added.
+    tenants_path: str = ""
 
     # Log level. DEBUG only in dev; never in prod. Validated to be one of
     # the canonical stdlib level names; lowercase input is normalised up.
@@ -97,24 +131,12 @@ class Settings(BaseSettings):
     @field_validator("frappe_base_url")
     @classmethod
     def _validate_frappe_base_url(cls, v: str) -> str:
-        if not isinstance(v, str) or not v.strip():
-            raise ValueError("frappe_base_url must be a non-empty URL")
-        parsed = urlparse(v)
-        if parsed.scheme not in ("http", "https"):
-            raise ValueError(
-                f"frappe_base_url scheme must be http or https; got {parsed.scheme!r}"
-            )
-        if not parsed.netloc:
-            raise ValueError(f"frappe_base_url missing host: {v!r}")
-        host = (parsed.hostname or "").lower()
-        # Treat any *.localhost host as loopback per RFC 6761 §6.3 — the
-        # spec reserves "localhost" and all subdomains as loopback.
-        is_loopback = host in _LOOPBACK_HOSTS or host.endswith(".localhost")
-        if parsed.scheme == "http" and not is_loopback:
-            raise ValueError(
-                f"frappe_base_url must use https:// for non-loopback hosts; got {v!r}"
-            )
-        return v
+        return _validate_http_url(v, "frappe_base_url")
+
+    @field_validator("ollama_base_url")
+    @classmethod
+    def _validate_ollama_base_url(cls, v: str) -> str:
+        return _validate_http_url(v, "ollama_base_url")
 
     # -- convenience accessors -------------------------------------------
 

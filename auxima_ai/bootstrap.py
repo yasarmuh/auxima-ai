@@ -1,0 +1,81 @@
+"""App-startup composition — wires the sidecar from env into one IntakeService.
+
+The intake router uses :func:`auxima_ai.intake.router.get_intake_service`
+to fetch the per-process service. In production, :func:`bootstrap_app`
+is called once at FastAPI startup; it reads :class:`Settings`, builds
+the real :class:`OllamaLLMCaller`, the :class:`PolicyEnforcer` (with
+tenants from ``tenants.yaml`` if the path is set), and installs the
+composed :class:`IntakeService` via
+:func:`auxima_ai.intake.router.set_intake_service`.
+
+The function is idempotent — calling it twice replaces the previous
+service — and returns the service it just installed so callers can
+hold a handle for graceful shutdown.
+
+Failure policy:
+  - Missing tenants file (when ``tenants_path`` is set) raises so the
+    sidecar refuses to start. A typo in the env var that silently
+    fell back to "no tenants" was the bug that produced a
+    "tenant-not-found" outage in prior incidents.
+  - Empty ``tenants_path`` is treated as "no tenants yet" — the
+    sidecar still starts; every ``/v1/*`` call refuses with
+    UnknownTenantError until policies are added by hot-reload.
+"""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from auxima_ai.config import Settings, get_settings
+from auxima_ai.intake.ollama import OllamaLLMCaller
+from auxima_ai.intake.router import set_intake_service
+from auxima_ai.intake.service import IntakeService
+from auxima_ai.policy.enforcer import PolicyEnforcer
+from auxima_ai.policy.loader import load_and_apply
+
+logger = logging.getLogger(__name__)
+
+
+class BootstrapError(RuntimeError):
+    """Raised when startup composition fails — sidecar must refuse to serve."""
+
+
+def build_intake_service(settings: Settings) -> IntakeService:
+    """Build an :class:`IntakeService` wired with the real Ollama + tenants.
+
+    Pure (no global mutation) so tests can drive it deterministically.
+    """
+    enforcer = PolicyEnforcer()
+
+    if settings.tenants_path:
+        path = Path(settings.tenants_path)
+        try:
+            count = load_and_apply(enforcer, path)
+        except Exception as e:
+            raise BootstrapError(
+                f"failed to load tenants from {path}: {e}"
+            ) from e
+        logger.info("bootstrap: loaded %d tenant policies from %s", count, path)
+    else:
+        logger.warning(
+            "bootstrap: tenants_path not set; /v1/* will refuse every call "
+            "with UnknownTenantError until policies are registered",
+        )
+
+    ollama = OllamaLLMCaller(base_url=settings.ollama_base_url)
+    return IntakeService(enforcer=enforcer, llm=ollama)
+
+
+def bootstrap_app(settings: Settings | None = None) -> IntakeService:
+    """Build + install the app-wide IntakeService. Idempotent.
+
+    Returns the service that was installed so callers can keep a handle
+    (e.g. for graceful shutdown of the OllamaLLMCaller's HTTP pool).
+    """
+    s = settings or get_settings()
+    service = build_intake_service(s)
+    set_intake_service(service)
+    return service
+
+
+__all__ = ("BootstrapError", "bootstrap_app", "build_intake_service")

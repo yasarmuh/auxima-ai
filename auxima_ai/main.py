@@ -17,6 +17,7 @@ from fastapi import FastAPI
 
 from auxima_ai import __version__
 from auxima_ai.auth import shared_secret_middleware
+from auxima_ai.bootstrap import BootstrapError, bootstrap_app
 from auxima_ai.config import get_settings
 from auxima_ai.intake.router import router as intake_router
 
@@ -31,6 +32,23 @@ app = FastAPI(
 
 app.middleware("http")(shared_secret_middleware)
 app.include_router(intake_router)
+
+
+@app.on_event("startup")
+def _startup_wire_intake_service() -> None:
+    """Compose the production IntakeService at app startup.
+
+    Wraps :func:`bootstrap_app` so a failed compose surfaces as a 503
+    on /healthz rather than a confusing late-bind error on the first
+    /v1/* call. Tests typically bypass this by registering their own
+    service via app.dependency_overrides BEFORE the first request.
+    """
+    try:
+        bootstrap_app()
+    except BootstrapError:
+        # Don't crash the app — /healthz remains useful for diagnosis.
+        # The intake router'\''s default service will refuse calls.
+        raise
 
 
 @app.get("/healthz")
