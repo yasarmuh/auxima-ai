@@ -106,6 +106,65 @@ def test_built_service_uses_ollama_caller_with_configured_url() -> None:
     assert svc.llm.base_url == "http://localhost:11434"
 
 
+def test_build_with_no_callback_token_uses_null_emitter() -> None:
+    """Without the frappe_callback_token, activity emission is disabled
+    (NullActivityEmitter) so the sidecar still serves but no row reaches
+    Frappe — the structured log event covers the audit case."""
+    from auxima_ai.intake.service import NullActivityEmitter
+    s = Settings(shared_secret="a" * 32, frappe_callback_token="")
+    svc = build_intake_service(s)
+    assert isinstance(svc.activity_emitter, NullActivityEmitter)
+
+
+def test_build_with_callback_token_wires_http_emitter() -> None:
+    from auxima_ai.activity.http_emitter import HTTPActivityEmitter
+    s = Settings(
+        shared_secret="a" * 32,
+        frappe_callback_token="b" * 32,
+        frappe_base_url="http://demo.localhost:8000",
+    )
+    svc = build_intake_service(s)
+    try:
+        assert isinstance(svc.activity_emitter, HTTPActivityEmitter)
+        # The emitter must use the configured Frappe URL.
+        assert svc.activity_emitter.base_url.startswith("http://demo.localhost:8000")
+        assert svc.activity_emitter.token == "b" * 32
+    finally:
+        # Clean up the HTTP client.
+        from auxima_ai.activity.http_emitter import HTTPActivityEmitter as _HE
+        if isinstance(svc.activity_emitter, _HE):
+            svc.activity_emitter.close()
+
+
+def test_activity_emission_enabled_property_reflects_token_state() -> None:
+    s_off = Settings(shared_secret="a" * 32, frappe_callback_token="")
+    s_on = Settings(shared_secret="a" * 32, frappe_callback_token="b" * 32)
+    assert s_off.activity_emission_enabled is False
+    assert s_on.activity_emission_enabled is True
+
+
+def test_callback_token_short_non_empty_rejected_at_construction(monkeypatch) -> None:
+    """Same fail-closed rule as shared_secret — a 4-char leftover refuses
+    to start instead of shipping with weak auth on the callback path."""
+    from pydantic import ValidationError
+    monkeypatch.setenv("AUXIMA_SIDECAR_SHARED_SECRET", "a" * 32)
+    monkeypatch.setenv("AUXIMA_SIDECAR_FRAPPE_CALLBACK_TOKEN", "test")  # 4 chars
+    reset_settings_cache()
+    with pytest.raises(ValidationError, match="frappe_callback_token"):
+        from auxima_ai.config import get_settings
+        get_settings()
+
+
+def test_callback_token_at_minimum_length_accepted() -> None:
+    """16 chars is the minimum floor."""
+    from auxima_ai.config import MIN_SHARED_SECRET_LEN
+    s = Settings(
+        shared_secret="a" * 32,
+        frappe_callback_token="t" * MIN_SHARED_SECRET_LEN,
+    )
+    assert s.activity_emission_enabled is True
+
+
 # ---------------------------------------------------------------------------
 # bootstrap_app — singleton installation
 # ---------------------------------------------------------------------------

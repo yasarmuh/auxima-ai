@@ -51,6 +51,21 @@ def _startup_wire_intake_service() -> None:
         raise
 
 
+@app.on_event("shutdown")
+def _shutdown_close_http_clients() -> None:
+    """Close the HTTPActivityEmitter + OllamaLLMCaller connection pools
+    so uvicorn'\''s graceful shutdown doesn'\''t spam ResourceWarnings."""
+    from auxima_ai.activity.http_emitter import HTTPActivityEmitter
+    from auxima_ai.intake.ollama import OllamaLLMCaller
+    from auxima_ai.intake.router import get_intake_service
+
+    svc = get_intake_service()
+    if isinstance(svc.activity_emitter, HTTPActivityEmitter):
+        svc.activity_emitter.close()
+    if isinstance(svc.llm, OllamaLLMCaller):
+        svc.llm.close()
+
+
 @app.get("/healthz")
 def healthz() -> dict[str, Any]:
     """Liveness probe. Unauthenticated — used by k8s/Docker healthchecks."""

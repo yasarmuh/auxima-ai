@@ -26,10 +26,15 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from auxima_ai.activity.http_emitter import HTTPActivityEmitter
 from auxima_ai.config import Settings, get_settings
 from auxima_ai.intake.ollama import OllamaLLMCaller
 from auxima_ai.intake.router import set_intake_service
-from auxima_ai.intake.service import IntakeService
+from auxima_ai.intake.service import (
+    ActivityEmitter,
+    IntakeService,
+    NullActivityEmitter,
+)
 from auxima_ai.policy.enforcer import PolicyEnforcer
 from auxima_ai.policy.loader import load_and_apply
 
@@ -63,7 +68,33 @@ def build_intake_service(settings: Settings) -> IntakeService:
         )
 
     ollama = OllamaLLMCaller(base_url=settings.ollama_base_url)
-    return IntakeService(enforcer=enforcer, llm=ollama)
+    activity_emitter: ActivityEmitter = _build_activity_emitter(settings)
+    return IntakeService(
+        enforcer=enforcer,
+        llm=ollama,
+        activity_emitter=activity_emitter,
+    )
+
+
+def _build_activity_emitter(settings: Settings) -> ActivityEmitter:
+    """Construct an HTTPActivityEmitter when the callback token is set;
+    otherwise fall back to the NullActivityEmitter so the CRM §4 invariant
+    is at least logged (the structured log event captures the same facts)."""
+    if settings.activity_emission_enabled:
+        logger.info(
+            "bootstrap: activity emission enabled (POST to %s)",
+            settings.frappe_base_url,
+        )
+        return HTTPActivityEmitter(
+            base_url=settings.frappe_base_url,
+            token=settings.frappe_callback_token,
+        )
+    logger.warning(
+        "bootstrap: activity emission DISABLED — frappe_callback_token unset; "
+        "the structured log event still captures intake.extract.completed, "
+        "but no Auxima Activity row will reach Frappe",
+    )
+    return NullActivityEmitter()
 
 
 def bootstrap_app(settings: Settings | None = None) -> IntakeService:

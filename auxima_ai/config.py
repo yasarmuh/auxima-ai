@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     # /v1/* call fails UnknownTenantError until policies are added.
     tenants_path: str = ""
 
+    # Shared secret used in the REVERSE direction — sidecar -> Frappe
+    # when POSTing Auxima Activity rows. Same length rules as
+    # shared_secret. Empty = activity emission disabled (NullActivityEmitter);
+    # the structured log event still captures the same facts so nothing
+    # is silently lost, but the Frappe-side audit log won't see the row.
+    frappe_callback_token: str = ""
+
     # Log level. DEBUG only in dev; never in prod. Validated to be one of
     # the canonical stdlib level names; lowercase input is normalised up.
     log_level: str = "INFO"
@@ -114,6 +121,21 @@ class Settings(BaseSettings):
         if len(v) < MIN_SHARED_SECRET_LEN:
             raise ValueError(
                 f"shared_secret must be empty (unconfigured) or "
+                f">= {MIN_SHARED_SECRET_LEN} chars; got {len(v)}"
+            )
+        return v
+
+    @field_validator("frappe_callback_token")
+    @classmethod
+    def _validate_frappe_callback_token(cls, v: str) -> str:
+        # Same fail-closed-on-short-but-non-empty rule as shared_secret —
+        # a 4-char "test" leftover token in prod env is a configuration
+        # mistake we want to surface at startup.
+        if v == "":
+            return v
+        if len(v) < MIN_SHARED_SECRET_LEN:
+            raise ValueError(
+                f"frappe_callback_token must be empty (disabled) or "
                 f">= {MIN_SHARED_SECRET_LEN} chars; got {len(v)}"
             )
         return v
@@ -144,6 +166,11 @@ class Settings(BaseSettings):
     def shared_secret_configured(self) -> bool:
         """``True`` iff a non-empty secret is set — middleware uses this."""
         return bool(self.shared_secret)
+
+    @property
+    def activity_emission_enabled(self) -> bool:
+        """``True`` iff sidecar -> Frappe activity-row emission is wired."""
+        return bool(self.frappe_callback_token)
 
 
 _settings: Settings | None = None
