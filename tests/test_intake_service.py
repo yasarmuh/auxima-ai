@@ -34,6 +34,7 @@ from auxima_ai.intake.service import (
     IntakeProviderDenied,
     IntakeRateLimited,
     IntakeReplay,
+    IntakeSchemaInvalid,
     IntakeService,
     IntakeSuccess,
     IntakeUnknownProvider,
@@ -272,7 +273,10 @@ def test_pii_in_llm_response_is_redacted() -> None:
         payload={
             "lead_name": "Acme",
             "contact_email": "pii@example.com",
-            "phone": "0512345678",
+            "contact_phone": "0512345678",
+            "line_of_business": "property",
+            "urgency": "normal",
+            "notes": None,
         },
     )
     svc = _service(llm=pii_llm)
@@ -280,11 +284,18 @@ def test_pii_in_llm_response_is_redacted() -> None:
     assert isinstance(r, IntakeSuccess)
     assert r.response.redaction_applied is True
     assert r.response.fields["contact_email"] == "<redacted:email>"
-    assert r.response.fields["phone"] == "<redacted:phone_ksa_local>"
+    assert r.response.fields["contact_phone"] == "<redacted:phone_ksa_local>"
 
 
 def test_no_pii_in_response_keeps_flag_false() -> None:
-    clean_llm = StubLLMCaller(payload={"lead_name": "Acme", "status": "open"})
+    clean_llm = StubLLMCaller(payload={
+        "lead_name": "Acme",
+        "contact_email": None,
+        "contact_phone": None,
+        "line_of_business": "unknown",
+        "urgency": "unknown",
+        "notes": "no PII at all here",
+    })
     svc = _service(llm=clean_llm)
     r = svc.extract(_req(), idempotency_key="k-clean", now=TS)
     assert isinstance(r, IntakeSuccess)
@@ -294,6 +305,48 @@ def test_no_pii_in_response_keeps_flag_false() -> None:
 # ---------------------------------------------------------------------------
 # Trace propagation
 # ---------------------------------------------------------------------------
+
+
+def test_schema_invalid_when_llm_omits_required_field() -> None:
+    """LLM returns payload missing lead_name -> IntakeSchemaInvalid, no row written."""
+    bad_llm = StubLLMCaller(payload={"contact_email": "ops@acme.example"})
+    svc = _service(llm=bad_llm)
+    r = svc.extract(_req(), idempotency_key="k-badshape", now=TS)
+    assert isinstance(r, IntakeSchemaInvalid)
+    assert any("lead_name" in e["loc"] for e in r.errors)
+
+
+def test_schema_invalid_when_llm_emits_extra_field() -> None:
+    """extra="forbid" — unexpected keys from the LLM are refused."""
+    bad_llm = StubLLMCaller(payload={"lead_name": "Acme", "rogue_field": "nope"})
+    svc = _service(llm=bad_llm)
+    r = svc.extract(_req(), idempotency_key="k-extra", now=TS)
+    assert isinstance(r, IntakeSchemaInvalid)
+
+
+def test_schema_invalid_with_bad_enum_value() -> None:
+    bad_llm = StubLLMCaller(payload={"lead_name": "Acme", "line_of_business": "spaceship"})
+    svc = _service(llm=bad_llm)
+    r = svc.extract(_req(), idempotency_key="k-enum", now=TS)
+    assert isinstance(r, IntakeSchemaInvalid)
+
+
+def test_prompt_template_is_used_for_llm_call() -> None:
+    """The LLM caller MUST receive the schema-shaped prompt, not raw lead_text."""
+    seen_prompts: list[str] = []
+
+    class CaptureLLM:
+        def call(self, *, model_id: str, prompt: str):
+            seen_prompts.append(prompt)
+            return StubLLMCaller().call(model_id=model_id, prompt=prompt)
+
+    svc = _service(llm=CaptureLLM())  # type: ignore[arg-type]
+    svc.extract(_req(lead_text="a real lead"), idempotency_key="k-tpl", now=TS)
+    assert seen_prompts
+    assert "a real lead" in seen_prompts[0]
+    # Schema-derived field list MUST be in the prompt.
+    for field in ("lead_name", "contact_email", "line_of_business", "urgency"):
+        assert field in seen_prompts[0]
 
 
 def test_trace_context_propagates_into_log_event(caplog: pytest.LogCaptureFixture) -> None:

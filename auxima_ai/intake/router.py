@@ -35,6 +35,7 @@ from auxima_ai.intake.service import (
     IntakeProviderDenied,
     IntakeRateLimited,
     IntakeReplay,
+    IntakeSchemaInvalid,
     IntakeService,
     IntakeSuccess,
     IntakeUnknownProvider,
@@ -103,6 +104,7 @@ def _ceil_retry_after(seconds: float) -> str:
         422: {"description": "Body validation failed OR same key with different body"},
         429: {"description": "Per-tenant rate limit hit; retry after the hint"},
         500: {"description": "Configuration bug — provider not classified for tier-gate"},
+        502: {"description": "Upstream LLM returned a payload that violated the field schema"},
     },
 )
 def extract(
@@ -193,6 +195,17 @@ def extract(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"provider {outcome.provider!r} not classified for tier policy",
+        )
+
+    if isinstance(outcome, IntakeSchemaInvalid):
+        # Upstream LLM returned the wrong shape — neither client nor
+        # sidecar bug, but we refuse to write a malformed activity row.
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content={
+                "detail": "upstream LLM response violated the intake-extract schema",
+                "errors": list(outcome.errors),
+            },
         )
 
     # Defensive: every outcome variant must be handled above.

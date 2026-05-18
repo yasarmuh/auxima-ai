@@ -301,6 +301,23 @@ def test_500_when_provider_unknown_to_classifier(client_with_service) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_502_when_llm_returns_schema_invalid_payload(client_with_service) -> None:
+    """Upstream-bug case: LLM responds but with wrong shape -> 502 Bad Gateway."""
+    bad_llm = StubLLMCaller(payload={"contact_email": "no-lead-name@example.com"})
+    svc = _build_service(llm=bad_llm)
+    client = client_with_service(svc)
+    r = client.post(
+        "/v1/intake/extract",
+        json=_body(),
+        headers={**AUTH_HEADER, "Idempotency-Key": "k-bg"},
+    )
+    assert r.status_code == 502
+    body = r.json()
+    assert "upstream" in body["detail"].lower()
+    assert isinstance(body["errors"], list)
+    assert body["errors"]
+
+
 def test_traceparent_propagates_into_log_event(
     client_with_service, caplog: pytest.LogCaptureFixture,
 ) -> None:

@@ -38,6 +38,11 @@ from auxima_ai.idempotency.store import (
 )
 from auxima_ai.ids.ulid import MonotonicGenerator
 from auxima_ai.intake.llm import LLMCaller, StubLLMCaller
+from auxima_ai.intake.prompts import (
+    SchemaViolationError,
+    build_intake_extract_prompt,
+    validate_intake_extract_response,
+)
 from auxima_ai.intake.schema import IntakeRequest, IntakeResponse
 from auxima_ai.observability.log import emit
 from auxima_ai.observability.redact import redact_json
@@ -109,6 +114,18 @@ class IntakeUnknownProvider:
     provider: str
 
 
+@dataclass(frozen=True)
+class IntakeSchemaInvalid:
+    """LLM responded but the payload failed schema validation — upstream bug.
+
+    Maps to HTTP 502 (Bad Gateway): not the client's fault, not the
+    sidecar's bug, but the upstream model didn't honour the schema we
+    asked for. ``errors`` is the flat error list from Pydantic.
+    """
+
+    errors: tuple[dict, ...]
+
+
 IntakeOutcome = (
     IntakeSuccess
     | IntakeReplay
@@ -118,6 +135,7 @@ IntakeOutcome = (
     | IntakeRateLimited
     | IntakeCeilingExceeded
     | IntakeUnknownProvider
+    | IntakeSchemaInvalid
 )
 
 
@@ -208,8 +226,29 @@ class IntakeService:
             )
         assert isinstance(idem, BeginAccepted)
 
-        # 4. LLM call (delegated to injected caller).
-        llm_response = self.llm.call(model_id=request.model_id, prompt=request.lead_text)
+        # 4. LLM call — wrapped in the schema-shaped prompt template so
+        #    the model knows exactly which fields to emit.
+        prompt = build_intake_extract_prompt(request.lead_text)
+        llm_response = self.llm.call(model_id=request.model_id, prompt=prompt)
+
+        # 4a. Strict response validation against IntakeExtractFields.
+        #    A model that returns the wrong shape is an upstream bug,
+        #    NOT a client error — we surface IntakeSchemaInvalid (502)
+        #    and refuse to write a malformed activity row.
+        try:
+            validated_fields = validate_intake_extract_response(llm_response.payload)
+        except SchemaViolationError as e:
+            emit(
+                "warn",
+                "intake.extract.schema_violation",
+                trace_id=trace_id, span_id=span_id,
+                fields={
+                    "tenant_id": request.tenant_id,
+                    "model_id": request.model_id,
+                    "error_count": len(e.errors),
+                },
+            )
+            return IntakeSchemaInvalid(errors=tuple(e.errors))
 
         # 5. Record actual spend (ledger may still reject on actual >> estimate).
         spend = self.enforcer.record_spend(
@@ -232,8 +271,10 @@ class IntakeService:
             )
         assert isinstance(spend, Recorded)
 
-        # 6. Build response.
-        redacted_fields, fired = redact_json(llm_response.payload)
+        # 6. Build response. Use the validated model dump (not the raw
+        #    payload) so optional fields normalise to their declared
+        #    defaults and unknown extras are already stripped.
+        redacted_fields, fired = redact_json(validated_fields.model_dump(mode="json"))
         response = IntakeResponse(
             activity_id=self.activity_ids.generate(),
             model_id=request.model_id,
@@ -277,6 +318,7 @@ __all__ = (
     "IntakeProviderDenied",
     "IntakeRateLimited",
     "IntakeReplay",
+    "IntakeSchemaInvalid",
     "IntakeService",
     "IntakeSuccess",
     "IntakeUnknownProvider",

@@ -49,13 +49,17 @@ class StubLLMCaller:
 
     def call(self, *, model_id: str, prompt: str) -> LLMResponse:
         # Mapping default = empty tuple by sentinel — convert at call time
-        # so a mutable default isn't shared between instances.
+        # so a mutable default isn't shared between instances. Default
+        # payload matches IntakeExtractFields exactly so the validator
+        # accepts it; tests that want failure cases override explicitly.
         body: dict[str, Any] = (
-            dict(self.payload) if isinstance(self.payload, Mapping) else {
+            dict(self.payload) if (isinstance(self.payload, Mapping) and self.payload) else {
                 "lead_name": "Acme Brokers",
                 "contact_email": "ops@acme.example",
-                "contact_phone_e164": "+966500000000",
-                "_stub": True,
+                "contact_phone": "+966500000000",
+                "line_of_business": "property",
+                "urgency": "normal",
+                "notes": None,
             }
         )
         return LLMResponse(
