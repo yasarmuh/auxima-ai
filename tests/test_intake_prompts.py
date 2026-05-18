@@ -220,6 +220,73 @@ def test_schema_violation_carries_flat_error_list() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_validator_populates_email_canonical_when_normalisable() -> None:
+    """contact_email "Foo@Example.COM" -> contact_email_canonical "Foo@example.com"."""
+    result = validate_intake_extract_response({
+        "lead_name": "Acme",
+        "contact_email": "Foo@Example.COM",
+    })
+    assert result.contact_email == "Foo@Example.COM"
+    assert result.contact_email_canonical == "Foo@example.com"
+
+
+def test_validator_leaves_email_canonical_none_when_unparseable() -> None:
+    """contact_email "not-an-email" -> contact_email_canonical stays None."""
+    result = validate_intake_extract_response({
+        "lead_name": "Acme",
+        "contact_email": "not-an-email",
+    })
+    assert result.contact_email == "not-an-email"
+    assert result.contact_email_canonical is None
+
+
+@pytest.mark.parametrize(
+    "raw, expected_e164",
+    [
+        ("0512345678",         "+966512345678"),
+        ("+966 50 000 0000",   "+966500000000"),
+        ("00966512345678",     "+966512345678"),
+        ("tel:+966512345678",  "+966512345678"),
+    ],
+)
+def test_validator_populates_phone_e164_when_normalisable(raw: str, expected_e164: str) -> None:
+    result = validate_intake_extract_response({
+        "lead_name": "Acme",
+        "contact_phone": raw,
+    })
+    assert result.contact_phone == raw.strip()
+    assert result.contact_phone_e164 == expected_e164
+
+
+def test_validator_leaves_phone_e164_none_when_unparseable() -> None:
+    result = validate_intake_extract_response({
+        "lead_name": "Acme",
+        "contact_phone": "not-a-phone",
+    })
+    assert result.contact_phone == "not-a-phone"
+    assert result.contact_phone_e164 is None
+
+
+def test_validator_honours_caller_supplied_canonical_forms() -> None:
+    """If the LLM/test stub already filled the _canonical / _e164 fields,
+    the post-validator must NOT overwrite them."""
+    result = validate_intake_extract_response({
+        "lead_name": "Acme",
+        "contact_email": "raw@example.com",
+        "contact_email_canonical": "explicit@override.com",
+        "contact_phone": "0512345678",
+        "contact_phone_e164": "+966999999999",
+    })
+    assert result.contact_email_canonical == "explicit@override.com"
+    assert result.contact_phone_e164 == "+966999999999"
+
+
+def test_validator_canonical_fields_none_when_raw_fields_none() -> None:
+    result = validate_intake_extract_response({"lead_name": "Acme"})
+    assert result.contact_email_canonical is None
+    assert result.contact_phone_e164 is None
+
+
 def test_schema_emits_all_required_fields() -> None:
     """The JSON schema embedded in the prompt must list lead_name as required."""
     schema = IntakeExtractFields.model_json_schema()

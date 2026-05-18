@@ -307,6 +307,57 @@ def test_no_pii_in_response_keeps_flag_false() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_response_carries_normalised_canonical_fields_through_redaction() -> None:
+    """End-to-end: LLM returns raw "Sales@AL-Mansour.SA" + "0512345678";
+    both raw and _canonical / _e164 are populated, then PII-redacted.
+
+    The redactor runs LAST on the response payload (S-19), so every
+    PII-shaped field — raw OR canonical — comes out as a placeholder.
+    The presence of the placeholder in BOTH raw and canonical slots
+    proves the normaliser ran and populated the canonical field
+    (otherwise the canonical field would be None, which the redactor
+    skips)."""
+    llm = StubLLMCaller(payload={
+        "lead_name": "Acme",
+        "contact_email": "Sales@AL-Mansour.SA",
+        "contact_phone": "0512345678",
+        "line_of_business": "property",
+        "urgency": "normal",
+        "notes": None,
+    })
+    svc = _service(llm=llm)
+    r = svc.extract(_req(), idempotency_key="k-norm", now=TS)
+    assert isinstance(r, IntakeSuccess)
+    # Raw email is PII -> redacted; raw phone is KSA local -> redacted.
+    assert r.response.fields["contact_email"] == "<redacted:email>"
+    assert r.response.fields["contact_phone"] == "<redacted:phone_ksa_local>"
+    # Canonical fields were populated (otherwise they'd be None and the
+    # redactor would have left them None). Redaction proves they ran.
+    assert r.response.fields["contact_email_canonical"] == "<redacted:email>"
+    assert r.response.fields["contact_phone_e164"] == "<redacted:phone_e164>"
+
+
+def test_response_canonical_fields_are_none_when_normalisation_fails() -> None:
+    """LLM returns junk-shaped values; canonical fields stay None
+    (so the redactor doesn'\''t pretend it normalised something it didn'\''t)."""
+    llm = StubLLMCaller(payload={
+        "lead_name": "Acme",
+        "contact_email": "not-an-email-at-all",
+        "contact_phone": "junk",
+        "line_of_business": "unknown",
+        "urgency": "unknown",
+        "notes": None,
+    })
+    svc = _service(llm=llm)
+    r = svc.extract(_req(), idempotency_key="k-junk", now=TS)
+    assert isinstance(r, IntakeSuccess)
+    assert r.response.fields["contact_email_canonical"] is None
+    assert r.response.fields["contact_phone_e164"] is None
+    # Raw fields preserved as-is (no PII pattern, so no redaction).
+    assert r.response.fields["contact_email"] == "not-an-email-at-all"
+    assert r.response.fields["contact_phone"] == "junk"
+
+
 def test_schema_invalid_when_llm_omits_required_field() -> None:
     """LLM returns payload missing lead_name -> IntakeSchemaInvalid, no row written."""
     bad_llm = StubLLMCaller(payload={"contact_email": "ops@acme.example"})

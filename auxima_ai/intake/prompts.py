@@ -41,7 +41,10 @@ import logging
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+from auxima_ai.util.email import normalise_email
+from auxima_ai.util.phone import normalise_phone
 
 logger = logging.getLogger(__name__)
 
@@ -70,16 +73,65 @@ class Urgency(str, Enum):
 
 
 class IntakeExtractFields(BaseModel):
-    """The canonical fields the M0 intake.extract endpoint returns."""
+    """The canonical fields the M0 intake.extract endpoint returns.
+
+    Normalisation contract:
+      - ``contact_email`` and ``contact_phone`` carry the LLM's raw
+        extraction verbatim — useful for traceability ("what did the
+        model actually see?").
+      - ``contact_email_canonical`` is the result of
+        :func:`normalise_email` if successful, else ``None``.
+      - ``contact_phone_e164`` is the result of
+        :func:`normalise_phone` (default country SA) if successful,
+        else ``None``.
+
+    Downstream callers (the CRM Lead doctype) should prefer the
+    ``_canonical`` / ``_e164`` fields when writing to typed columns
+    and fall back to the raw value only for human display.
+    """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     lead_name: str = Field(..., min_length=1, max_length=200)
     contact_email: str | None = Field(None, max_length=320)
     contact_phone: str | None = Field(None, max_length=64)
+    contact_email_canonical: str | None = Field(
+        None,
+        max_length=320,
+        description="contact_email after RFC-5321 normalisation; None if unparseable.",
+    )
+    contact_phone_e164: str | None = Field(
+        None,
+        max_length=20,
+        description="contact_phone normalised to E.164; None if unparseable.",
+    )
     line_of_business: LineOfBusiness = LineOfBusiness.UNKNOWN
     urgency: Urgency = Urgency.UNKNOWN
     notes: str | None = Field(None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _populate_canonical_forms(self) -> "IntakeExtractFields":
+        """Run the email + phone normalisers after primary validation.
+
+        Mutates the model in place via :func:`object.__setattr__` so
+        Pydantic's "frozen post-validate" semantics don't reject the
+        write. Pydantic v2 model_validator(mode="after") permits this
+        pattern; we use it because the alternative (returning a new
+        instance) re-triggers validation in an infinite loop.
+
+        Honours explicit caller overrides: if the LLM (or test stub)
+        already set ``contact_email_canonical`` / ``contact_phone_e164``
+        to a non-None value, we don't overwrite it.
+        """
+        if self.contact_email_canonical is None and self.contact_email:
+            email = normalise_email(self.contact_email)
+            if email is not None:
+                object.__setattr__(self, "contact_email_canonical", email.address)
+        if self.contact_phone_e164 is None and self.contact_phone:
+            phone = normalise_phone(self.contact_phone)
+            if phone is not None:
+                object.__setattr__(self, "contact_phone_e164", phone.e164)
+        return self
 
 
 # ---------------------------------------------------------------------------
