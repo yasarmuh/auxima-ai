@@ -23,8 +23,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
+from auxima_ai.activity.row import ActivityRow, RetentionClass, build_activity_row
 from auxima_ai.cost.ledger import CeilingExceeded as LedgerCeilingExceeded, Recorded
 from auxima_ai.idempotency.store import (
     BeginAccepted,
@@ -140,6 +141,41 @@ IntakeOutcome = (
 
 
 # ---------------------------------------------------------------------------
+# ActivityEmitter — the CRM §4 invariant sink
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class ActivityEmitter(Protocol):
+    """Where successful pipeline runs send their Auxima Activity rows.
+
+    Production wires a Frappe-side HTTP POST satisfying this Protocol;
+    tests use ``CapturingActivityEmitter`` to assert on the rows the
+    service produced.
+    """
+
+    def emit(self, row: ActivityRow) -> None: ...
+
+
+@dataclass
+class CapturingActivityEmitter:
+    """Test / dev helper — keeps every emitted row in memory."""
+
+    rows: list[ActivityRow] = field(default_factory=list)
+
+    def emit(self, row: ActivityRow) -> None:
+        self.rows.append(row)
+
+
+@dataclass
+class NullActivityEmitter:
+    """Drops every row on the floor. Default for un-wired test services."""
+
+    def emit(self, row: ActivityRow) -> None:  # noqa: ARG002 - protocol shape
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
 
@@ -157,6 +193,7 @@ class IntakeService:
     idempotency: IdempotencyStore = field(default_factory=InMemoryIdempotencyStore)
     llm: LLMCaller = field(default_factory=StubLLMCaller)
     activity_ids: MonotonicGenerator = field(default_factory=MonotonicGenerator)
+    activity_emitter: ActivityEmitter = field(default_factory=lambda: NullActivityEmitter())
 
     def extract(
         self,
@@ -307,10 +344,38 @@ class IntakeService:
             },
         )
 
+        # 9. Emit the canonical Auxima Activity row (CRM §4 invariant).
+        #    Reuses the response.activity_id as the row ULID so the row
+        #    in the audit log and the activity_id in the HTTP response
+        #    are the same identifier — clients can follow the link
+        #    without joining on a separate field.
+        activity_row = build_activity_row(
+            tenant_id=request.tenant_id,
+            kind="intake.extract.completed",
+            payload={
+                "model_id": response.model_id,
+                "provider": response.provider,
+                "fields": response.fields,
+                "cost": response.cost,
+                "period_total": response.period_total,
+                "prompt_tokens": response.prompt_tokens,
+                "completion_tokens": response.completion_tokens,
+                "latency_ms": response.latency_ms,
+            },
+            retention=RetentionClass.OPERATIONAL,
+            source="sidecar.intake.extract",
+            idempotency_key=idempotency_key,
+            ts=now,
+            row_id=response.activity_id,
+        )
+        self.activity_emitter.emit(activity_row)
+
         return IntakeSuccess(response=response)
 
 
 __all__ = (
+    "ActivityEmitter",
+    "CapturingActivityEmitter",
     "IntakeCeilingExceeded",
     "IntakeConflict",
     "IntakeInFlight",
@@ -320,6 +385,7 @@ __all__ = (
     "IntakeReplay",
     "IntakeSchemaInvalid",
     "IntakeService",
+    "NullActivityEmitter",
     "IntakeSuccess",
     "IntakeUnknownProvider",
 )

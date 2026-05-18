@@ -28,6 +28,8 @@ from auxima_ai.idempotency.store import InMemoryIdempotencyStore
 from auxima_ai.intake.llm import LLMResponse, StubLLMCaller
 from auxima_ai.intake.schema import IntakeRequest
 from auxima_ai.intake.service import (
+    ActivityEmitter,
+    CapturingActivityEmitter,
     IntakeCeilingExceeded,
     IntakeConflict,
     IntakeInFlight,
@@ -38,7 +40,9 @@ from auxima_ai.intake.service import (
     IntakeService,
     IntakeSuccess,
     IntakeUnknownProvider,
+    NullActivityEmitter,
 )
+from auxima_ai.activity.row import ActivityRow, RetentionClass
 from auxima_ai.observability.log import EVENT_LOGGER_NAME
 from auxima_ai.observability.trace import TraceContext, new_context
 from auxima_ai.policy.enforcer import PolicyEnforcer, TenantPolicy, TierPolicy
@@ -76,17 +80,21 @@ def _service(
     llm: StubLLMCaller | None = None,
     rate_capacity: float = 1000.0,
     rate_refill: float = 100.0,
+    activity_emitter: ActivityEmitter | None = None,
 ) -> IntakeService:
     enf = PolicyEnforcer(
         ledger=InMemoryCostLedger(),
         rate_limiter=PerTenantRateLimiter(capacity=rate_capacity, refill_per_second=rate_refill),
     )
     enf.set_policy(policy or _policy(capacity=rate_capacity, refill=rate_refill))
-    return IntakeService(
+    kwargs: dict = dict(
         enforcer=enf,
         idempotency=InMemoryIdempotencyStore(),
         llm=llm or StubLLMCaller(),
     )
+    if activity_emitter is not None:
+        kwargs["activity_emitter"] = activity_emitter
+    return IntakeService(**kwargs)
 
 
 def _req(
@@ -398,6 +406,78 @@ def test_prompt_template_is_used_for_llm_call() -> None:
     # Schema-derived field list MUST be in the prompt.
     for field in ("lead_name", "contact_email", "line_of_business", "urgency"):
         assert field in seen_prompts[0]
+
+
+# ---------------------------------------------------------------------------
+# Activity emitter — CRM §4 invariant
+# ---------------------------------------------------------------------------
+
+
+def test_success_emits_one_activity_row_with_matching_id() -> None:
+    cap = CapturingActivityEmitter()
+    svc = _service(activity_emitter=cap)
+    r = svc.extract(_req(), idempotency_key="k-act-1", now=TS)
+    assert isinstance(r, IntakeSuccess)
+    assert len(cap.rows) == 1
+    row = cap.rows[0]
+    assert isinstance(row, ActivityRow)
+    assert row.id == r.response.activity_id  # row id == response activity_id
+    assert row.tenant_id == "tenant-acme"
+    assert row.kind == "intake.extract.completed"
+    assert row.retention == RetentionClass.OPERATIONAL
+    assert row.source == "sidecar.intake.extract"
+    assert row.idempotency_key == "k-act-1"
+    assert row.ts == TS
+    # Payload carries the response shape (without PII bcs StubLLM default
+    # uses the *.example domain which the redactor will mark).
+    assert row.payload["model_id"] == "ollama/qwen2.5:32b"
+    assert row.payload["provider"] == "ollama"
+
+
+def test_each_outcome_branch_does_not_emit_except_success() -> None:
+    """Rate-limited / ceiling-exceeded / provider-denied must NOT emit a row."""
+    cap = CapturingActivityEmitter()
+    svc = _service(
+        policy=_policy(ceiling=Decimal("0.0000001")),
+        activity_emitter=cap,
+    )
+    r = svc.extract(
+        _req(model_id="gemini/gemini-2.0-flash", lead_text="x" * 5000),
+        idempotency_key="k-no-emit",
+        now=TS,
+    )
+    assert isinstance(r, IntakeCeilingExceeded)
+    assert cap.rows == []
+
+
+def test_schema_invalid_does_not_emit_activity_row() -> None:
+    """Upstream-LLM-bug case must NOT pollute the activity log."""
+    bad_llm = StubLLMCaller(payload={"contact_email": "x@y.co"})  # no lead_name
+    cap = CapturingActivityEmitter()
+    svc = _service(llm=bad_llm, activity_emitter=cap)
+    r = svc.extract(_req(), idempotency_key="k-bad-shape", now=TS)
+    assert isinstance(r, IntakeSchemaInvalid)
+    assert cap.rows == []
+
+
+def test_replay_does_not_emit_second_activity_row() -> None:
+    """Two calls with same key + body -> only the first writes to the audit log."""
+    cap = CapturingActivityEmitter()
+    svc = _service(activity_emitter=cap)
+    first = svc.extract(_req(), idempotency_key="k-replay-once", now=TS)
+    second = svc.extract(_req(), idempotency_key="k-replay-once", now=TS)
+    assert isinstance(first, IntakeSuccess)
+    assert isinstance(second, IntakeReplay)
+    assert len(cap.rows) == 1
+    assert cap.rows[0].id == first.response.activity_id
+
+
+def test_default_service_uses_null_emitter() -> None:
+    """An IntakeService without an explicit emitter does NOT crash on success."""
+    svc = _service()
+    assert isinstance(svc.activity_emitter, NullActivityEmitter)
+    r = svc.extract(_req(), idempotency_key="k-null", now=TS)
+    assert isinstance(r, IntakeSuccess)
 
 
 def test_trace_context_propagates_into_log_event(caplog: pytest.LogCaptureFixture) -> None:
