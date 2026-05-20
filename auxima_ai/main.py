@@ -16,7 +16,7 @@ from typing import Any
 from fastapi import FastAPI
 
 from auxima_ai import __version__
-from auxima_ai.auth import shared_secret_middleware
+from auxima_ai.auth_select import select_auth_middleware
 from auxima_ai.bootstrap import BootstrapError, bootstrap_app
 from auxima_ai.config import get_settings
 from auxima_ai.intake.router import router as intake_router
@@ -30,7 +30,11 @@ app = FastAPI(
     ),
 )
 
-app.middleware("http")(shared_secret_middleware)
+# Inbound auth is config-selected (S-54 / GAP-16 cutover): shared_secret by
+# default (unchanged Phase-0 contract), or the Auxima-v1 HMAC scheme when
+# AUXIMA_SIDECAR_SIDECAR_AUTH_MODE=auxima_v1. select_auth_middleware fails
+# fast at import if auxima_v1 is set without key material.
+app.middleware("http")(select_auth_middleware(get_settings()))
 app.include_router(intake_router)
 
 

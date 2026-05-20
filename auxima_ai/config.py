@@ -107,6 +107,22 @@ class Settings(BaseSettings):
     # the canonical stdlib level names; lowercase input is normalised up.
     log_level: str = "INFO"
 
+    # Which inbound auth scheme guards /v1/* (S-54 / GAP-16 cutover).
+    #   "shared_secret" (default) — the Phase-0 X-Auxima-Sidecar-Token scheme.
+    #   "auxima_v1"               — the HMAC + replay-protected Auxima-v1 scheme.
+    # Defaults to shared_secret so the live contract is unchanged until the
+    # Frappe-side Auxima-v1 signer ships. Switching to auxima_v1 requires the
+    # primary/secondary key env vars below.
+    sidecar_auth_mode: str = "shared_secret"
+
+    # Auxima-v1 dual-key material (only used when sidecar_auth_mode=auxima_v1).
+    # Each key is base64(32 random bytes); key_id is its audit-legible name
+    # (e.g. "p2026q2"). Env vars: AUXIMA_SIDECAR_PRIMARY_KEY_B64 etc.
+    primary_key_id: str = ""
+    primary_key_b64: str = ""
+    secondary_key_id: str = ""
+    secondary_key_b64: str = ""
+
     # -- validators -------------------------------------------------------
 
     @field_validator("shared_secret")
@@ -139,6 +155,17 @@ class Settings(BaseSettings):
                 f">= {MIN_SHARED_SECRET_LEN} chars; got {len(v)}"
             )
         return v
+
+    @field_validator("sidecar_auth_mode")
+    @classmethod
+    def _validate_sidecar_auth_mode(cls, v: str) -> str:
+        normalised = (v or "").strip().lower()
+        if normalised not in ("shared_secret", "auxima_v1"):
+            raise ValueError(
+                "sidecar_auth_mode must be 'shared_secret' or 'auxima_v1'; "
+                f"got {v!r}"
+            )
+        return normalised
 
     @field_validator("log_level")
     @classmethod
