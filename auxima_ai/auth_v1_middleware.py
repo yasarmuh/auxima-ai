@@ -33,7 +33,7 @@ signer MUST construct the path identically or every request 401s.
 from __future__ import annotations
 
 import logging
-from typing import Awaitable, Callable, Iterable
+from typing import Awaitable, Callable, Iterable, Optional
 
 from fastapi import Request, status
 from fastapi.responses import JSONResponse
@@ -51,12 +51,43 @@ from auxima_ai.auth_v1 import (
     Keyring,
     verify_request,
 )
+from auxima_ai.observability import log as obs_log
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_UNAUTHENTICATED_PATHS: frozenset[str] = frozenset(
     {"/healthz", "/openapi.json", "/docs", "/redoc"}
 )
+
+#: An audit callback: ``(outcome, key_id, reason)`` where outcome is
+#: ``"accepted"`` | ``"rejected"``, key_id is the validated key (or
+#: ``"unknown"`` when the request never resolved one), reason is the S-54
+#: §3.5 rejection reason (``None`` on accept). The middleware feeds this on
+#: every auth outcome so the AI Run Log audit (S-54 R7) can prove which key
+#: signed which call. Best-effort: a sink raising MUST NOT change the
+#: request outcome.
+AuthAuditSink = Callable[[str, str, Optional[str]], None]
+
+#: key_id placeholder for rejects that never resolved a key (R7).
+_UNKNOWN_KEY_ID = "unknown"
+
+
+def _default_audit_sink(outcome: str, key_id: str, reason: str | None) -> None:
+    """Route an auth outcome to the S-19 structured-event emitter.
+
+    Emits ``auth.v1.request.accepted`` / ``auth.v1.request.rejected`` with
+    ``key_id`` (and ``reason`` on reject) ONLY — never the nonce, hmac, or
+    timestamp (S-54 R10). The log shipper / AI Run Log forwarder consumes
+    these events.
+    """
+    if outcome == "accepted":
+        obs_log.emit("info", "auth.v1.request.accepted", fields={"key_id": key_id})
+    else:
+        obs_log.emit(
+            "warn",
+            "auth.v1.request.rejected",
+            fields={"key_id": key_id, "reason": reason},
+        )
 
 
 def _request_path_with_query(request: Request) -> str:
@@ -78,6 +109,7 @@ def make_auth_v1_middleware(
     nonce_ttl_seconds: int = DEFAULT_NONCE_TTL_SECONDS,
     clock=None,
     unauthenticated_paths: Iterable[str] = DEFAULT_UNAUTHENTICATED_PATHS,
+    audit_sink: AuthAuditSink | None = None,
 ) -> Callable[[Request, Callable[[Request], Awaitable]], Awaitable]:
     """Build an ``http`` middleware enforcing the Auxima-v1 scheme.
 
@@ -98,9 +130,19 @@ def make_auth_v1_middleware(
         Paths exempt from auth (probes + API docs).
     """
     exempt = frozenset(unauthenticated_paths)
+    sink: AuthAuditSink = audit_sink or _default_audit_sink
     verify_kwargs = {"skew_seconds": skew_seconds}
     if clock is not None:
         verify_kwargs["clock"] = clock
+
+    def _audit(outcome: str, key_id: str, reason: str | None) -> None:
+        """Feed the audit sink, best-effort. An audit/observability failure
+        must NEVER change the request outcome (or leak as a 500) — swallow
+        it after a WARNING (the request decision already stands)."""
+        try:
+            sink(outcome, key_id, reason)
+        except Exception:  # noqa: BLE001 - observability is best-effort
+            logger.warning("auth_v1 audit sink failed; request outcome unchanged")
 
     async def middleware(
         request: Request, call_next: Callable[[Request], Awaitable]
@@ -139,6 +181,7 @@ def make_auth_v1_middleware(
             # (iter-279 review M6). Reason only — never the hmac / nonce /
             # secret / timestamp (S-54 R10).
             logger.warning("auth_v1 reject reason=%s", e.reason)
+            _audit("rejected", _UNKNOWN_KEY_ID, e.reason)
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"detail": "unauthorized", "reason": e.reason},
@@ -164,6 +207,7 @@ def make_auth_v1_middleware(
         if isinstance(claim, NonceReplay):
             # Replay = active attack or buggy retry (S-54 §3.5: PAGE).
             logger.warning("auth_v1 reject reason=replay key_id=%s", token.key_id)
+            _audit("rejected", token.key_id, "replay")
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"detail": "unauthorized", "reason": "replay"},
@@ -173,9 +217,10 @@ def make_auth_v1_middleware(
         # key_id only (R10).
         request.state.auth_key_id = token.key_id
         logger.info("auth_v1 accept key_id=%s", token.key_id)
+        _audit("accepted", token.key_id, None)
         return await call_next(request)
 
     return middleware
 
 
-__all__ = ("DEFAULT_UNAUTHENTICATED_PATHS", "make_auth_v1_middleware")
+__all__ = ("AuthAuditSink", "DEFAULT_UNAUTHENTICATED_PATHS", "make_auth_v1_middleware")
