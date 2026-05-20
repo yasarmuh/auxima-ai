@@ -1,0 +1,21 @@
+#!/bin/sh
+# AC-10 / S-54 R11 — block committing a real sidecar HMAC key value.
+#
+# Install once per clone:   git config core.hooksPath .githooks
+#
+# Scans the staged files for a literal base64(32-byte) value assigned to
+# SIDECAR_PRIMARY_KEY_B64 / SIDECAR_SECONDARY_KEY_B64. The variable NAME,
+# $REFs, empty assignments, and placeholders are NOT flagged — only an
+# actual key shape. The scanner never echoes the matched secret.
+set -e
+
+if command -v python >/dev/null 2>&1; then
+  PY=python
+elif command -v python3 >/dev/null 2>&1; then
+  PY=python3
+else
+  echo "pre-commit: python not found; skipping AC-10 key-leak scan" >&2
+  exit 0
+fi
+
+exec "$PY" -m auxima_ai.key_leak_scan
