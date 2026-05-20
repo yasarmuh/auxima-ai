@@ -49,6 +49,18 @@ from typing import Callable, Final, Mapping
 
 SCHEME: Final[str] = "Auxima-v1"
 DEFAULT_SKEW_SECONDS: Final[int] = 300  # ±5 min (S-54 R4).
+#: Upper bound on the attacker-influenced token fields (key_id, nonce).
+#: Aligned with ``auth_nonce.MAX_NONCE_LEN`` so a token that passes
+#: verification cannot then be rejected by the replay store (which would
+#: surface as a 500, not a clean 401 — see the iter-279 security review).
+MAX_FIELD_LEN: Final[int] = 256
+#: Characters that must never appear in key_id / nonce. ``\n`` and ``\r``
+#: are the canonical-preimage field separators; ``:`` is the token
+#: separator. Allowing any of them would let two distinct
+#: (key_id, ts, nonce, method, path, body) tuples produce an IDENTICAL
+#: canonical preimage (S-54 §3.2 "always exactly one separator"), breaking
+#: the injective-preimage guarantee the whole scheme rests on.
+_FORBIDDEN_FIELD_CHARS: Final[tuple[str, ...]] = ("\n", "\r", ":")
 _EMPTY_BODY_SHA256: Final[str] = (
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 )
@@ -91,9 +103,14 @@ class StaleTimestampError(AuthError):
 
 
 class FutureTimestampError(AuthError):
-    """Timestamp is more than ``skew_seconds`` in the future."""
+    """Timestamp is more than ``skew_seconds`` in the future.
 
-    reason = "stale_timestamp"  # same audit bucket as stale (clock skew).
+    Distinct reason from stale (iter-279 review M2): a far-future timestamp
+    is a replay-window-extension attempt, not benign past clock skew, and
+    audit/alerting should be able to tell them apart.
+    """
+
+    reason = "future_timestamp"
 
 
 class BadHmacError(AuthError):
@@ -183,6 +200,27 @@ def _sha256_hex(body: bytes) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
+def _validate_token_field(name: str, value: str) -> None:
+    """Reject a token field that could break the LF-separated preimage.
+
+    ``key_id`` and ``nonce`` are attacker-influenced. A field containing a
+    field separator (``\\n`` / ``\\r``) or the token separator (``:``) would
+    let two distinct field tuples produce the same canonical preimage
+    (S-54 §3.2). Legitimate base64url nonces and short-ASCII key_ids never
+    contain these characters. Raises :class:`MalformedTokenError`.
+    """
+    if not isinstance(value, str) or value == "":
+        raise MalformedTokenError(f"{name} must be a non-empty string")
+    if any(c in value for c in _FORBIDDEN_FIELD_CHARS):
+        raise MalformedTokenError(
+            f"{name} contains a forbidden separator character"
+        )
+    if len(value) > MAX_FIELD_LEN:
+        raise MalformedTokenError(
+            f"{name} exceeds maximum length {MAX_FIELD_LEN}"
+        )
+
+
 def canonical_preimage(
     key_id: str,
     timestamp: int,
@@ -200,7 +238,13 @@ def canonical_preimage(
     - ``path`` is the raw URL path incl. query string; NOT host, NOT scheme.
     - body is hashed to its lowercase hex sha256 (empty body → the empty
       string digest).
+
+    Defensively rejects a ``\\n`` / ``\\r`` / ``:`` in ``key_id`` or
+    ``nonce`` (the attacker-influenced fields) so the sign path fails closed
+    too — :func:`parse_authorization` enforces the same on the verify path.
     """
+    _validate_token_field("key_id", key_id)
+    _validate_token_field("nonce", nonce)
     body_bytes = _coerce_body(body)
     fields = (
         key_id,
@@ -213,9 +257,14 @@ def canonical_preimage(
     return "\n".join(fields).encode("utf-8")
 
 
+def _hmac_digest(raw_key: bytes, preimage: bytes) -> bytes:
+    """Raw HMAC-SHA256 digest bytes (used for constant-time verify)."""
+    return hmac.new(raw_key, preimage, hashlib.sha256).digest()
+
+
 def _compute_hmac_b64(raw_key: bytes, preimage: bytes) -> str:
-    digest = hmac.new(raw_key, preimage, hashlib.sha256).digest()
-    return base64.b64encode(digest).decode("ascii")
+    """Base64 HMAC (the on-the-wire form produced by :func:`sign_request`)."""
+    return base64.b64encode(_hmac_digest(raw_key, preimage)).decode("ascii")
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +300,12 @@ def parse_authorization(header_value: str | None) -> ParsedToken:
             "token must be key_id:timestamp:nonce:hmac (4 non-empty fields)"
         )
     key_id, ts_raw, nonce, hmac_b64 = fields
+    # Reject forbidden separator chars / overlong values in the attacker-
+    # influenced fields BEFORE any further processing (iter-279 review C1).
+    # (`:` cannot appear post-split, but `\n` / `\r` can, and would break
+    # the canonical preimage's injectivity.)
+    _validate_token_field("key_id", key_id)
+    _validate_token_field("nonce", nonce)
     try:
         timestamp = int(ts_raw)
     except (TypeError, ValueError) as e:
@@ -357,8 +412,15 @@ def verify_request(
     preimage = canonical_preimage(
         token.key_id, token.timestamp, token.nonce, method, path, body
     )
-    expected = _compute_hmac_b64(raw_key, preimage)
-    if not hmac.compare_digest(expected, token.hmac_b64):
+    # Compare RAW digest bytes, not the base64 strings: type-stable (both
+    # bytes), and an unparseable base64 hmac is an explicit BadHmacError
+    # rather than a silent never-matches (iter-279 review H4).
+    expected_digest = _hmac_digest(raw_key, preimage)
+    try:
+        presented_digest = base64.b64decode(token.hmac_b64, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise BadHmacError("presented HMAC is not valid base64") from e
+    if not hmac.compare_digest(expected_digest, presented_digest):
         # Never log expected/actual digests — knowing `expected` defeats the
         # signature for this one preimage (S-54 R10).
         raise BadHmacError("HMAC mismatch")

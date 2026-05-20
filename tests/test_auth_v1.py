@@ -269,3 +269,56 @@ def test_parse_authorization_returns_fields() -> None:
     assert token.timestamp == _FIXED_NOW
     assert token.nonce == "bm9uY2UtMTIz"
     assert token.hmac_b64  # non-empty
+
+
+# ---------------------------------------------------------------------------
+# iter-279 security-review fixes
+# ---------------------------------------------------------------------------
+
+
+def test_newline_in_nonce_rejected_at_parse() -> None:
+    # C1: a \n in the nonce would break the LF-separated preimage's
+    # injectivity. Reject at parse.
+    with pytest.raises(MalformedTokenError):
+        parse_authorization(f"{SCHEME} p2026q2:{_FIXED_NOW}:no\nnce:aGVsbG8=")
+
+
+def test_carriage_return_in_nonce_rejected_at_parse() -> None:
+    with pytest.raises(MalformedTokenError):
+        parse_authorization(f"{SCHEME} p2026q2:{_FIXED_NOW}:no\rnce:aGVsbG8=")
+
+
+def test_newline_in_key_id_rejected_at_parse() -> None:
+    with pytest.raises(MalformedTokenError):
+        parse_authorization(f"{SCHEME} p20\n26q2:{_FIXED_NOW}:nonce:aGVsbG8=")
+
+
+def test_overlong_nonce_rejected_at_parse() -> None:
+    # finding-1 alignment: parse rejects a nonce longer than the replay
+    # store would accept, so a verified token can't later 500 the store.
+    long_nonce = "a" * 257
+    with pytest.raises(MalformedTokenError):
+        parse_authorization(f"{SCHEME} p2026q2:{_FIXED_NOW}:{long_nonce}:aGVsbG8=")
+
+
+def test_canonical_preimage_rejects_newline_in_field() -> None:
+    # The sign-path guard: canonical_preimage itself refuses a \n field so
+    # a buggy/malicious signer also fails closed.
+    with pytest.raises(Exception):  # AuthError subclass
+        canonical_preimage("k", 1, "no\nnce", "POST", "/v1/x", b"{}")
+
+
+def test_bad_base64_hmac_raises_bad_hmac() -> None:
+    # H4: a non-base64 hmac field is an explicit BadHmacError (not a silent
+    # never-match, and not a 500 from a future bytes-mode refactor).
+    header = f"{SCHEME} p2026q2:{_FIXED_NOW}:bm9uY2U:!!!notbase64!!!"
+    with pytest.raises(BadHmacError):
+        verify_request(header, "POST", "/v1/x", b"{}", _keyring(), clock=_clock())
+
+
+def test_future_timestamp_reason_is_distinct_from_stale() -> None:
+    # M2: future != stale in the audit reason.
+    header = _signed(ts=_FIXED_NOW + (DEFAULT_SKEW_SECONDS + 1))
+    with pytest.raises(FutureTimestampError) as ei:
+        verify_request(header, "POST", "/v1/intake/extract", b'{"x":1}', _keyring(), clock=_clock())
+    assert ei.value.reason == "future_timestamp"
