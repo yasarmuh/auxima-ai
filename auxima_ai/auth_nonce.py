@@ -190,6 +190,99 @@ class InMemoryNonceStore:
             del self._seen[k]
 
 
+# ---------------------------------------------------------------------------
+# Redis implementation (prod — shared nonce namespace across replicas)
+# ---------------------------------------------------------------------------
+
+
+#: Builtin socket-level errors caught even when redis-py is not installed.
+#: redis-py's own ``ConnectionError`` / ``TimeoutError`` do NOT subclass these
+#: builtins, so a real deployment SHOULD pass ``unavailable_errors`` (or use
+#: :meth:`RedisNonceStore.with_redis_errors`) — but a bare socket failure on a
+#: duck-typed client still fails closed by default.
+_DEFAULT_UNAVAILABLE_ERRORS: Final[tuple[type[BaseException], ...]] = (
+    ConnectionError,
+    TimeoutError,
+    OSError,
+)
+
+
+@dataclass
+class RedisNonceStore:
+    """Redis-backed replay store — the prod impl (S-54 §3.3).
+
+    Unlike :class:`InMemoryNonceStore`, all sidecar replicas share one nonce
+    namespace, so a captured header replayed against a *different* replica is
+    still caught (AC-1 cross-process).
+
+    The single ``SET key value NX EX ttl`` is the atomic claim — it both
+    records the first-seen nonce AND reports whether it already existed in one
+    round-trip, closing the TOCTOU window a separate GET-then-SET would open
+    (S-54 §3.3). redis-py returns ``True`` when the key was set, ``None`` when
+    NX prevented it (replay).
+
+    **No hard ``redis`` dependency:** ``client`` is duck-typed — any object
+    with ``set(name, value, *, nx, ex)`` works (the real redis-py client, a
+    fake, or a connection-pool wrapper). This keeps ``redis`` an optional/
+    deploy-time dependency so the no-frappe isolation + license-hygiene CI is
+    unaffected.
+
+    **Fail-closed (R5):** if the client raises any of ``unavailable_errors``
+    (default: builtin socket errors; pass redis-py's exception classes in
+    prod via :meth:`with_redis_errors`), ``claim`` raises
+    :class:`NonceStoreUnavailable` so the middleware returns 503 — never
+    "skip replay protection".
+    """
+
+    client: object
+    key_prefix: str = "auxima_ai:nonce"
+    unavailable_errors: tuple[type[BaseException], ...] = _DEFAULT_UNAVAILABLE_ERRORS
+
+    @classmethod
+    def with_redis_errors(cls, client: object, **kwargs) -> RedisNonceStore:
+        """Build a store wired to redis-py's own connection-error classes.
+
+        Resolves ``redis.exceptions.ConnectionError`` / ``TimeoutError`` at
+        call time (so ``redis`` need not be importable unless this is used).
+        Falls back to the builtin socket errors if redis-py is absent.
+        """
+        errors: tuple[type[BaseException], ...] = _DEFAULT_UNAVAILABLE_ERRORS
+        try:  # pragma: no cover - exercised only where redis-py is installed
+            from redis import exceptions as _redis_exc
+
+            errors = (_redis_exc.ConnectionError, _redis_exc.TimeoutError)
+        except ImportError:
+            pass
+        return cls(client, unavailable_errors=errors, **kwargs)
+
+    def _key(self, key_id: str, nonce: str) -> str:
+        return f"{self.key_prefix}:{key_id}:{nonce}"
+
+    def claim(
+        self,
+        key_id: str,
+        nonce: str,
+        ttl_seconds: int = DEFAULT_NONCE_TTL_SECONDS,
+    ) -> ClaimResult:
+        _validate(key_id, nonce)
+        if ttl_seconds <= 0:
+            raise NonceStoreError(f"ttl_seconds must be > 0; got {ttl_seconds}")
+
+        key = self._key(key_id, nonce)
+        try:
+            # value is diagnostic only (S-54 §3.3); the SET return is what
+            # decides fresh vs replay. NX+EX is one atomic op (no TOCTOU).
+            was_set = self.client.set(key, "1", nx=True, ex=ttl_seconds)
+        except self.unavailable_errors as e:
+            # Fail closed (R5): we cannot verify uniqueness → 503, not 401/200.
+            logger.warning("nonce store unreachable; failing closed")
+            raise NonceStoreUnavailable("redis unreachable") from e
+
+        if was_set:
+            return NonceFresh(key_id=key_id, nonce=nonce)
+        return NonceReplay(key_id=key_id, nonce=nonce)
+
+
 __all__ = (
     "DEFAULT_NONCE_TTL_SECONDS",
     "MAX_NONCE_LEN",
@@ -201,4 +294,5 @@ __all__ = (
     "NonceStore",
     "NonceStoreError",
     "NonceStoreUnavailable",
+    "RedisNonceStore",
 )
