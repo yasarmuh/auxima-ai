@@ -1,0 +1,204 @@
+"""Nonce replay-protection store for the Auxima-v1 sidecar auth (S-54 §3.3 / R5).
+
+The :mod:`auxima_ai.auth_v1` core verifies a request's HMAC + timestamp skew
+*statelessly*. Replay protection is the stateful second half: an attacker who
+captures a valid Authorization header can re-send it byte-for-byte within the
+skew window unless the sidecar remembers which nonces it has already accepted.
+
+This module provides that memory, following the SAME pattern as
+:mod:`auxima_ai.idempotency.store`:
+  - a :class:`NonceStore` Protocol (the contract),
+  - an :class:`InMemoryNonceStore` (thread-safe, lazy-TTL, injectable clock)
+    for single-process / test use,
+  - a Redis-backed implementation deferred to prod (it will satisfy the same
+    Protocol — Redis ``SET key value NX EX ttl`` is the atomic primitive,
+    avoiding the TOCTOU window S-54 §3.3 warns about).
+
+Contract (S-54 R5):
+  - key space: ``(key_id, nonce)`` — the nonce is scoped to its signing key.
+  - TTL: ``2 × skew_window`` (default 600 s). After TTL the nonce can be seen
+    again, but by then the timestamp window in auth_v1 rejects it anyway.
+  - **fail-closed**: if the backing store is unreachable, the caller MUST 503
+    (NOT fall back to "no replay protection"). The Protocol surfaces this as
+    :class:`NonceStoreUnavailable`; the in-memory store never raises it, but
+    the middleware contract + the future Redis impl rely on it.
+
+The single ``claim`` call is the whole API: it atomically records a
+first-seen nonce (→ :class:`NonceFresh`) or detects a repeat
+(→ :class:`NonceReplay`). There is no separate "check then record" — that
+split would re-introduce the TOCTOU race.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Final, Protocol, runtime_checkable
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_NONCE_TTL_SECONDS: Final[int] = 600  # 2 × the 300 s auth skew window.
+MAX_NONCE_LEN: Final[int] = 256  # generous; a base64url(16 bytes) nonce is 22.
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class NonceStoreError(ValueError):
+    """Base — invalid input to the store."""
+
+
+class InvalidNonceError(NonceStoreError):
+    """Raised when key_id / nonce is empty, too long, or not a string."""
+
+
+class NonceStoreUnavailable(RuntimeError):
+    """The backing store could not be reached. The caller MUST fail closed
+    (HTTP 503 + Retry-After), NOT skip replay protection (S-54 R5). The
+    in-memory store never raises this; the Redis impl will."""
+
+
+# ---------------------------------------------------------------------------
+# Result types — one per outcome of claim()
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class NonceFresh:
+    """The (key_id, nonce) pair was not seen within the TTL — request proceeds."""
+
+    key_id: str
+    nonce: str
+
+
+@dataclass(frozen=True)
+class NonceReplay:
+    """The (key_id, nonce) pair was already accepted within the TTL — REJECT
+    (S-54 §3.5: 401 reason=replay, and PAGE — replay = active attack or a
+    buggy retry)."""
+
+    key_id: str
+    nonce: str
+
+
+ClaimResult = NonceFresh | NonceReplay
+
+
+# ---------------------------------------------------------------------------
+# Protocol
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class NonceStore(Protocol):
+    """Abstract replay store — in-memory + Redis impls both satisfy this."""
+
+    def claim(
+        self, key_id: str, nonce: str, ttl_seconds: int
+    ) -> ClaimResult:
+        """Atomically record a first-seen nonce or detect a replay.
+
+        Raises :class:`NonceStoreUnavailable` if the store is unreachable
+        (caller fails closed → 503)."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+
+def _validate(key_id: str, nonce: str) -> None:
+    for label, value in (("key_id", key_id), ("nonce", nonce)):
+        if not isinstance(value, str) or not value:
+            raise InvalidNonceError(f"{label} must be a non-empty string")
+        if len(value) > MAX_NONCE_LEN:
+            raise InvalidNonceError(
+                f"{label} length {len(value)} exceeds maximum {MAX_NONCE_LEN}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# In-memory implementation
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class InMemoryNonceStore:
+    """Thread-safe in-memory nonce store with lazy TTL eviction.
+
+    Mirrors :class:`auxima_ai.idempotency.store.InMemoryIdempotencyStore`.
+    Suitable for single-process FastAPI (uvicorn workers=1) + tests. NOT
+    suitable for multi-replica prod — a captured nonce replayed against a
+    DIFFERENT replica would not be caught (each replica has its own memory).
+    Use the Redis impl in prod so all replicas share one nonce namespace.
+
+    The ``clock`` is injectable so tests drive time forward without sleeping.
+    """
+
+    clock: Callable[[], float] = field(default=time.time)
+    _seen: dict[str, float] = field(default_factory=dict)  # composite -> expires_at
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    @staticmethod
+    def _composite(key_id: str, nonce: str) -> str:
+        # key_id and nonce are bounded + validated; "::" cannot occur inside a
+        # base64url nonce, so the separator is unambiguous.
+        return f"{key_id}::{nonce}"
+
+    def claim(
+        self,
+        key_id: str,
+        nonce: str,
+        ttl_seconds: int = DEFAULT_NONCE_TTL_SECONDS,
+    ) -> ClaimResult:
+        _validate(key_id, nonce)
+        if ttl_seconds <= 0:
+            raise NonceStoreError(f"ttl_seconds must be > 0; got {ttl_seconds}")
+
+        now = self.clock()
+        composite = self._composite(key_id, nonce)
+
+        with self._lock:
+            self._evict_expired_locked(now)
+            existing = self._seen.get(composite)
+            if existing is not None and existing > now:
+                # Still within TTL → this is a replay.
+                return NonceReplay(key_id=key_id, nonce=nonce)
+            # Fresh (never seen, or its prior TTL has lapsed) → record + accept.
+            self._seen[composite] = now + ttl_seconds
+            return NonceFresh(key_id=key_id, nonce=nonce)
+
+    def size(self) -> int:
+        """Number of live nonces (after eviction). Diagnostics / tests."""
+        with self._lock:
+            self._evict_expired_locked(self.clock())
+            return len(self._seen)
+
+    def clear(self) -> None:
+        """Drop everything. Test-only."""
+        with self._lock:
+            self._seen.clear()
+
+    def _evict_expired_locked(self, now: float) -> None:
+        """Caller must hold ``self._lock``. Drop nonces past their TTL."""
+        expired = [k for k, exp in self._seen.items() if exp <= now]
+        for k in expired:
+            del self._seen[k]
+
+
+__all__ = (
+    "DEFAULT_NONCE_TTL_SECONDS",
+    "MAX_NONCE_LEN",
+    "ClaimResult",
+    "InMemoryNonceStore",
+    "InvalidNonceError",
+    "NonceFresh",
+    "NonceReplay",
+    "NonceStore",
+    "NonceStoreError",
+    "NonceStoreUnavailable",
+)
