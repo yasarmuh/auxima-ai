@@ -18,6 +18,7 @@ The real AI endpoints (intake/extract, recommend, etc.) land per P1-10 + later.
 from __future__ import annotations
 
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI
@@ -28,6 +29,33 @@ from auxima_ai.auth_whoami import router as whoami_router
 from auxima_ai.bootstrap import BootstrapError, bootstrap_app
 from auxima_ai.config import Settings, get_settings
 from auxima_ai.intake.router import router as intake_router
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Startup/shutdown lifecycle (replaces the deprecated on_event handlers).
+
+    Startup: compose the production IntakeService; a failed compose raises so
+    it surfaces at startup rather than as a confusing late-bind error on the
+    first /v1/* call. Shutdown: close the HTTPActivityEmitter + OllamaLLMCaller
+    connection pools so uvicorn's graceful shutdown doesn't spam
+    ResourceWarnings. As before, this only runs when the app is entered as a
+    context (e.g. `with TestClient(app)`), so plain-construction tests skip it.
+    """
+    try:
+        bootstrap_app()
+    except BootstrapError:
+        raise
+    yield
+    from auxima_ai.activity.http_emitter import HTTPActivityEmitter
+    from auxima_ai.intake.ollama import OllamaLLMCaller
+    from auxima_ai.intake.router import get_intake_service
+
+    svc = get_intake_service()
+    if isinstance(svc.activity_emitter, HTTPActivityEmitter):
+        svc.activity_emitter.close()
+    if isinstance(svc.llm, OllamaLLMCaller):
+        svc.llm.close()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -53,40 +81,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "FastAPI service for the multi-agent CRM. REST-only contract with the Frappe "
             "`auxima` app. Never imports frappe."
         ),
+        lifespan=_lifespan,
     )
 
     app.middleware("http")(select_auth_middleware(settings))
     app.include_router(intake_router)
     app.include_router(whoami_router)
-
-    @app.on_event("startup")
-    def _startup_wire_intake_service() -> None:
-        """Compose the production IntakeService at app startup.
-
-        Wraps :func:`bootstrap_app` so a failed compose surfaces clearly at
-        startup. Tests typically bypass this by not entering the TestClient
-        context (startup only fires on context-enter) or by registering their
-        own service via app.dependency_overrides before the first request.
-        """
-        try:
-            bootstrap_app()
-        except BootstrapError:
-            # Don't swallow — surface the compose failure at startup.
-            raise
-
-    @app.on_event("shutdown")
-    def _shutdown_close_http_clients() -> None:
-        """Close the HTTPActivityEmitter + OllamaLLMCaller connection pools
-        so uvicorn's graceful shutdown doesn't spam ResourceWarnings."""
-        from auxima_ai.activity.http_emitter import HTTPActivityEmitter
-        from auxima_ai.intake.ollama import OllamaLLMCaller
-        from auxima_ai.intake.router import get_intake_service
-
-        svc = get_intake_service()
-        if isinstance(svc.activity_emitter, HTTPActivityEmitter):
-            svc.activity_emitter.close()
-        if isinstance(svc.llm, OllamaLLMCaller):
-            svc.llm.close()
 
     @app.get("/healthz")
     def healthz() -> dict[str, Any]:
