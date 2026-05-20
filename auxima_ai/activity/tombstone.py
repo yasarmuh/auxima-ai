@@ -32,7 +32,6 @@ from auxima_ai.activity.row import (
     RetentionClass,
     build_activity_row,
 )
-from auxima_ai.ids.ulid import is_valid
 
 logger = logging.getLogger(__name__)
 

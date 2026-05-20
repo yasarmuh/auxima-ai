@@ -25,7 +25,7 @@ import pytest
 from auxima_ai.cost.ledger import InMemoryCostLedger
 from auxima_ai.cost.pricing import ModelPricing, register_pricing, reset_pricing_table
 from auxima_ai.idempotency.store import InMemoryIdempotencyStore
-from auxima_ai.intake.llm import LLMResponse, StubLLMCaller
+from auxima_ai.intake.llm import StubLLMCaller
 from auxima_ai.intake.schema import IntakeRequest
 from auxima_ai.intake.service import (
     ActivityEmitter,
@@ -44,7 +44,7 @@ from auxima_ai.intake.service import (
 )
 from auxima_ai.activity.row import ActivityRow, RetentionClass
 from auxima_ai.observability.log import EVENT_LOGGER_NAME
-from auxima_ai.observability.trace import TraceContext, new_context
+from auxima_ai.observability.trace import new_context
 from auxima_ai.policy.enforcer import PolicyEnforcer, TenantPolicy, TierPolicy
 from auxima_ai.ratelimit.bucket import PerTenantRateLimiter
 

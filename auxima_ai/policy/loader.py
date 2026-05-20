@@ -31,7 +31,6 @@ from __future__ import annotations
 import logging
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator

@@ -22,8 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from auxima_ai.activity.row import ActivityRow, RetentionClass, build_activity_row
 from auxima_ai.cost.ledger import CeilingExceeded as LedgerCeilingExceeded, Recorded

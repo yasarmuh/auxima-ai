@@ -24,7 +24,6 @@ Thread-safe via per-bucket lock. Injectable clock for tests.
 from __future__ import annotations
 
 import logging
-import math
 import threading
 import time
 from dataclasses import dataclass, field

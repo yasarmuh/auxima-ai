@@ -25,7 +25,7 @@ from textwrap import dedent
 
 import pytest
 
-from auxima_ai.policy.enforcer import PolicyEnforcer, TenantPolicy, TierPolicy
+from auxima_ai.policy.enforcer import PolicyEnforcer, TierPolicy
 from auxima_ai.policy.loader import (
     TenantManifestError,
     TenantsManifest,

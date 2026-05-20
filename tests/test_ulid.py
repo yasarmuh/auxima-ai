@@ -18,7 +18,6 @@ Coverage per ULID spec (https://github.com/ulid/spec):
 from __future__ import annotations
 
 import threading
-from typing import Iterable
 
 import pytest
 
@@ -71,7 +70,10 @@ def test_extract_timestamp_matches_injected_clock() -> None:
 def test_same_ms_yields_same_prefix() -> None:
     """Two ULIDs generated at the same instant share the 10-char timestamp prefix."""
     fixed_ms = 1_715_986_380_123
-    clk = lambda: fixed_ms / 1000
+
+    def clk() -> float:
+        return fixed_ms / 1000
+
     a = generate(clock=clk)
     b = generate(clock=clk)
     assert a[:TIMESTAMP_CHARS] == b[:TIMESTAMP_CHARS]

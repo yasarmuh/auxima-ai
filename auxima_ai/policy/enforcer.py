@@ -39,7 +39,6 @@ from auxima_ai.cost.ledger import (
     Recorded,
 )
 from auxima_ai.cost.pricing import (
-    UnknownModelError,
     cost_for,
     pricing_for,
 )

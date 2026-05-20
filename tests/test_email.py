@@ -18,7 +18,6 @@ from __future__ import annotations
 import pytest
 
 from auxima_ai.util.email import (
-    DOMAIN_MAX,
     EMAIL_MAX,
     Email,
     LOCAL_PART_MAX,

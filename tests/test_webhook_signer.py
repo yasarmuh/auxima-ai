@@ -40,7 +40,6 @@ from auxima_ai.webhooks.signer import (
     SIGNATURE_VERSION,
     SignatureError,
     SignatureMismatchError,
-    SignedHeaders,
     sign,
     verify,
 )
@@ -152,20 +151,29 @@ def test_swapped_body_with_same_timestamp_fails() -> None:
 
 def test_expired_signature_rejected() -> None:
     headers = sign(BODY, SECRET, timestamp=FIXED_TS).as_dict()
-    later_clock = lambda: float(FIXED_TS + DEFAULT_MAX_AGE_SECONDS + 1)
+
+    def later_clock() -> float:
+        return float(FIXED_TS + DEFAULT_MAX_AGE_SECONDS + 1)
+
     with pytest.raises(ExpiredSignatureError):
         verify(BODY, headers, SECRET, clock=later_clock)
 
 
 def test_signature_within_max_age_accepted() -> None:
     headers = sign(BODY, SECRET, timestamp=FIXED_TS).as_dict()
-    later_clock = lambda: float(FIXED_TS + DEFAULT_MAX_AGE_SECONDS - 1)
+
+    def later_clock() -> float:
+        return float(FIXED_TS + DEFAULT_MAX_AGE_SECONDS - 1)
+
     verify(BODY, headers, SECRET, clock=later_clock)
 
 
 def test_signature_exactly_at_max_age_accepted() -> None:
     headers = sign(BODY, SECRET, timestamp=FIXED_TS).as_dict()
-    boundary_clock = lambda: float(FIXED_TS + DEFAULT_MAX_AGE_SECONDS)
+
+    def boundary_clock() -> float:
+        return float(FIXED_TS + DEFAULT_MAX_AGE_SECONDS)
+
     verify(BODY, headers, SECRET, clock=boundary_clock)
 
 
@@ -187,7 +195,10 @@ def test_future_timestamp_within_skew_accepted() -> None:
 
 def test_max_age_zero_disables_age_check() -> None:
     headers = sign(BODY, SECRET, timestamp=FIXED_TS).as_dict()
-    way_later = lambda: float(FIXED_TS + 1_000_000)
+
+    def way_later() -> float:
+        return float(FIXED_TS + 1_000_000)
+
     verify(BODY, headers, SECRET, max_age_seconds=0, clock=way_later)
 
 

@@ -24,7 +24,6 @@ from decimal import Decimal
 import pytest
 
 from auxima_ai.cost.ledger import (
-    COST_QUANTUM,
     CeilingExceeded,
     CostLedgerError,
     InMemoryCostLedger,

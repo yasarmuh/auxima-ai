@@ -27,7 +27,7 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Final, Mapping, Protocol, runtime_checkable
+from typing import Final, Mapping, Protocol, runtime_checkable
 
 from auxima_ai.ids.ulid import MonotonicGenerator, is_valid
 
