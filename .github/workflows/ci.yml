@@ -10,6 +10,21 @@ jobs:
   test:
     name: pytest + isolation firewall
     runs-on: ubuntu-22.04
+    services:
+      # Real Redis so the nonce-store integration drills (AC-1 cross-instance
+      # replay, AC-6 fail-closed) actually run here instead of skipping. The
+      # health-check gate makes the service ready before the steps start.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    env:
+      REDIS_URL: redis://localhost:6379/0
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
