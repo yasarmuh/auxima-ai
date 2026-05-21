@@ -96,6 +96,18 @@ class Settings(BaseSettings):
     # /v1/* call fails UnknownTenantError until policies are added.
     tenants_path: str = ""
 
+    # --- assist.draft-email model chain (provider-agnostic, with fallback) ---
+    # The OpenRouter model tried first (free/cloud, per dev request). The
+    # OpenRouter API key itself is read from the OPENROUTER_API_KEY env var by
+    # OpenRouterLLMCaller (not duplicated here); if it is unset, the OpenRouter
+    # step is skipped and only the local Ollama step is wired.
+    assist_openrouter_model: str = "google/gemma-4-31b-it:free"
+    # The local Ollama model used as the reliable fallback. llama3.2:1b is the
+    # fast-on-CPU default for dev; point this at a 7B/GPU model in prod.
+    assist_ollama_model: str = "llama3.2:1b"
+    # Generation can be slow on CPU; assist gets its own (larger) timeout.
+    assist_ollama_timeout_s: float = 120.0
+
     # Shared secret used in the REVERSE direction — sidecar -> Frappe
     # when POSTing Auxima Activity rows. Same length rules as
     # shared_secret. Empty = activity emission disabled (NullActivityEmitter);

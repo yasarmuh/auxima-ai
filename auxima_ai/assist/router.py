@@ -16,12 +16,21 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, status
 from fastapi.responses import JSONResponse
 
-from auxima_ai.assist.schema import DraftEmailRequest, DraftEmailResponse
+from auxima_ai.assist.schema import (
+	DraftEmailRequest,
+	DraftEmailResponse,
+	DraftNoteRequest,
+	DraftNoteResponse,
+	SuggestFieldsRequest,
+	SuggestFieldsResponse,
+)
 from auxima_ai.assist.service import (
 	AssistService,
 	DraftDegraded,
 	DraftEmailSuccess,
+	DraftNoteSuccess,
 	DraftSchemaInvalid,
+	SuggestFieldsSuccess,
 )
 
 _service_singleton: AssistService | None = None
@@ -93,10 +102,84 @@ def draft_email(
 	raise AssertionError(f"unhandled draft outcome: {type(outcome).__name__}")  # pragma: no cover
 
 
+@router.post(
+	"/draft-note",
+	response_model=DraftNoteResponse,
+	summary="Draft a short note/comment, or explain a blocked action (error-help)",
+	responses={
+		200: {"description": "Drafted note text"},
+		502: {"description": "Upstream model replied but not in the required shape"},
+		503: {"description": "All AI models unavailable — proceed manually"},
+	},
+)
+def draft_note(
+	body: DraftNoteRequest,
+	service: AssistService = Depends(get_assist_service),
+):
+	"""Draft one note (comment / error_help / general); degrade cleanly."""
+	outcome = service.draft_note(body)
+
+	if isinstance(outcome, DraftNoteSuccess):
+		return JSONResponse(status_code=200, content=outcome.response.model_dump())
+
+	if isinstance(outcome, DraftDegraded):
+		return JSONResponse(
+			status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+			content={"detail": "AI is temporarily unavailable.", "degraded": True, "reason": outcome.reason},
+			headers={"Retry-After": "30"},
+		)
+
+	if isinstance(outcome, DraftSchemaInvalid):
+		return JSONResponse(
+			status_code=status.HTTP_502_BAD_GATEWAY,
+			content={"detail": "the AI model returned an unexpected format.", "errors": list(outcome.errors)},
+		)
+
+	raise AssertionError(f"unhandled note outcome: {type(outcome).__name__}")  # pragma: no cover
+
+
+@router.post(
+	"/suggest-fields",
+	response_model=SuggestFieldsResponse,
+	summary="Suggest values for empty fields (suggestion-only; user reviews)",
+	responses={
+		200: {"description": "Suggestions for the requested empty fields (may be empty)"},
+		502: {"description": "Upstream model replied but not in the required shape"},
+		503: {"description": "All AI models unavailable"},
+	},
+)
+def suggest_fields(
+	body: SuggestFieldsRequest,
+	service: AssistService = Depends(get_assist_service),
+):
+	"""Suggest values for empty fields; degrade cleanly."""
+	outcome = service.suggest_fields(body)
+
+	if isinstance(outcome, SuggestFieldsSuccess):
+		return JSONResponse(status_code=200, content=outcome.response.model_dump())
+
+	if isinstance(outcome, DraftDegraded):
+		return JSONResponse(
+			status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+			content={"detail": "AI is temporarily unavailable.", "degraded": True, "reason": outcome.reason},
+			headers={"Retry-After": "30"},
+		)
+
+	if isinstance(outcome, DraftSchemaInvalid):
+		return JSONResponse(
+			status_code=status.HTTP_502_BAD_GATEWAY,
+			content={"detail": "the AI model returned an unexpected format.", "errors": list(outcome.errors)},
+		)
+
+	raise AssertionError(f"unhandled suggest outcome: {type(outcome).__name__}")  # pragma: no cover
+
+
 __all__ = (
 	"draft_email",
+	"draft_note",
 	"get_assist_service",
 	"reset_assist_service",
 	"router",
 	"set_assist_service",
+	"suggest_fields",
 )

@@ -18,9 +18,20 @@ from auxima_ai.assist.fallback import AllProvidersUnavailable
 from auxima_ai.assist.prompts import (
 	SchemaViolationError,
 	build_draft_email_prompt,
+	build_draft_note_prompt,
+	build_suggest_fields_prompt,
 	validate_draft_email_response,
+	validate_draft_note_response,
+	validate_suggest_fields_response,
 )
-from auxima_ai.assist.schema import DraftEmailRequest, DraftEmailResponse
+from auxima_ai.assist.schema import (
+	DraftEmailRequest,
+	DraftEmailResponse,
+	DraftNoteRequest,
+	DraftNoteResponse,
+	SuggestFieldsRequest,
+	SuggestFieldsResponse,
+)
 from auxima_ai.intake.llm import LLMCaller, StubLLMCaller
 from auxima_ai.observability.log import emit
 
@@ -51,6 +62,22 @@ class DraftSchemaInvalid:
 
 
 DraftOutcome = DraftEmailSuccess | DraftDegraded | DraftSchemaInvalid
+
+
+@dataclass(frozen=True)
+class DraftNoteSuccess:
+	response: DraftNoteResponse
+
+
+NoteOutcome = DraftNoteSuccess | DraftDegraded | DraftSchemaInvalid
+
+
+@dataclass(frozen=True)
+class SuggestFieldsSuccess:
+	response: SuggestFieldsResponse
+
+
+SuggestOutcome = SuggestFieldsSuccess | DraftDegraded | DraftSchemaInvalid
 
 
 @dataclass
@@ -103,12 +130,100 @@ class AssistService:
 		)
 		return DraftEmailSuccess(response=response)
 
+	def draft_note(self, request: DraftNoteRequest) -> NoteOutcome:
+		"""Draft a short note/comment/error-help text; degrade cleanly."""
+		model_id = request.model_id or DEFAULT_MODEL_ID
+		prompt = build_draft_note_prompt(request)
+
+		try:
+			llm_response = self.llm.call(model_id=model_id, prompt=prompt)
+		except AllProvidersUnavailable as e:
+			emit(
+				"warn", "assist.draft_note.degraded",
+				fields={"tenant_id": request.tenant_id, "kind": request.kind, "reason": str(e)[:200]},
+			)
+			return DraftDegraded(reason=str(e))
+
+		try:
+			fields = validate_draft_note_response(llm_response.payload)
+		except SchemaViolationError as e:
+			emit(
+				"warn", "assist.draft_note.schema_violation",
+				fields={"tenant_id": request.tenant_id, "kind": request.kind, "error_count": len(e.errors)},
+			)
+			return DraftSchemaInvalid(errors=tuple(e.errors))
+
+		response = DraftNoteResponse(
+			text=fields.text,
+			kind=request.kind,
+			language=request.language,
+			degraded=False,
+			model_version=llm_response.model_version,
+			prompt_tokens=llm_response.prompt_tokens,
+			completion_tokens=llm_response.completion_tokens,
+			latency_ms=llm_response.latency_ms,
+		)
+		emit(
+			"info", "assist.draft_note.completed",
+			fields={
+				"tenant_id": request.tenant_id, "kind": request.kind,
+				"language": request.language, "model_version": response.model_version,
+			},
+		)
+		return DraftNoteSuccess(response=response)
+
+	def suggest_fields(self, request: SuggestFieldsRequest) -> SuggestOutcome:
+		"""Suggest values for empty fields; degrade cleanly. Suggestion-only."""
+		model_id = request.model_id or DEFAULT_MODEL_ID
+		prompt = build_suggest_fields_prompt(request)
+		allowed = {f.fieldname for f in request.fields}
+
+		try:
+			llm_response = self.llm.call(model_id=model_id, prompt=prompt)
+		except AllProvidersUnavailable as e:
+			emit(
+				"warn", "assist.suggest_fields.degraded",
+				fields={"tenant_id": request.tenant_id, "doctype": request.doctype, "reason": str(e)[:200]},
+			)
+			return DraftDegraded(reason=str(e))
+
+		try:
+			suggestions = validate_suggest_fields_response(llm_response.payload, allowed)
+		except SchemaViolationError as e:
+			emit(
+				"warn", "assist.suggest_fields.schema_violation",
+				fields={"tenant_id": request.tenant_id, "doctype": request.doctype, "error_count": len(e.errors)},
+			)
+			return DraftSchemaInvalid(errors=tuple(e.errors))
+
+		response = SuggestFieldsResponse(
+			suggestions=suggestions,
+			degraded=False,
+			model_version=llm_response.model_version,
+			prompt_tokens=llm_response.prompt_tokens,
+			completion_tokens=llm_response.completion_tokens,
+			latency_ms=llm_response.latency_ms,
+		)
+		emit(
+			"info", "assist.suggest_fields.completed",
+			fields={
+				"tenant_id": request.tenant_id, "doctype": request.doctype,
+				"suggested": len(suggestions), "requested": len(allowed),
+				"model_version": response.model_version,
+			},
+		)
+		return SuggestFieldsSuccess(response=response)
+
 
 __all__ = (
 	"AssistService",
 	"DEFAULT_MODEL_ID",
 	"DraftDegraded",
 	"DraftEmailSuccess",
+	"DraftNoteSuccess",
 	"DraftOutcome",
 	"DraftSchemaInvalid",
+	"NoteOutcome",
+	"SuggestFieldsSuccess",
+	"SuggestOutcome",
 )
