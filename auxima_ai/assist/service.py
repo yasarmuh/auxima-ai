@@ -34,6 +34,7 @@ from auxima_ai.assist.schema import (
 )
 from auxima_ai.intake.llm import LLMCaller, LLMResponse, StubLLMCaller
 from auxima_ai.observability.log import emit
+from auxima_ai.observability.redact import redact
 from auxima_ai.policy.enforcer import PolicyEnforcer
 
 logger = logging.getLogger(__name__)
@@ -132,8 +133,22 @@ class AssistService:
 						tenant_id, step.provider_class, step.model_id,
 					)
 					continue
+				# R3 — data minimisation before cloud egress (GDPR/PDPL): local
+				# (self-hosted) steps get the FULL prompt (best quality, no egress);
+				# any cloud step gets structured identifiers (email/phone/national-id/
+				# CR/IBAN) redacted first. NOTE: redact.py is regex-based and does NOT
+				# remove names/company (no NER) — those still reach an opted-in cloud
+				# tier; that residual is flagged for R7/counsel.
+				step_prompt = prompt
+				if step.provider_class != "self-hosted":
+					step_prompt, fired = redact(prompt)
+					if fired:
+						logger.info(
+							"assist: redacted structured PII before cloud egress to %s (tenant %s)",
+							step.model_id, tenant_id,
+						)
 				try:
-					return step.caller.call(model_id=step.model_id, prompt=prompt)
+					return step.caller.call(model_id=step.model_id, prompt=step_prompt)
 				except Exception as e:  # noqa: BLE001 - any failure advances the chain
 					errors.append((step.model_id, f"{type(e).__name__}: {e}"))
 					logger.warning("assist provider %s failed, trying next: %s", step.model_id, e)
