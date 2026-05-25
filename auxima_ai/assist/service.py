@@ -32,14 +32,32 @@ from auxima_ai.assist.schema import (
 	SuggestFieldsRequest,
 	SuggestFieldsResponse,
 )
-from auxima_ai.intake.llm import LLMCaller, StubLLMCaller
+from auxima_ai.intake.llm import LLMCaller, LLMResponse, StubLLMCaller
 from auxima_ai.observability.log import emit
+from auxima_ai.policy.enforcer import PolicyEnforcer
 
 logger = logging.getLogger(__name__)
 
-#: default dev model chain is configured at the FallbackLLMCaller; this is the
-#: logical id passed through when the caller is a single provider / the stub.
-DEFAULT_MODEL_ID = "openrouter/google/gemma-4-31b-it:free"
+#: Logical fallback model id for the legacy single-``llm`` path (no enforcer
+#: wired). CLAUDE §2 default = self-hosted Ollama; the policy-gated production
+#: path uses the per-:class:`ProviderStep` model id, not this.
+DEFAULT_MODEL_ID = "ollama/llama3.1:8b"
+
+
+@dataclass(frozen=True)
+class ProviderStep:
+    """One ordered provider in the policy-gated assist fallback chain.
+
+    ``provider_class`` is the CLAUDE §2 egress class — ``self-hosted`` /
+    ``free-cloud`` / ``paid-cloud`` — tagged explicitly at construction
+    (in :func:`auxima_ai.bootstrap.build_assist_service`, which knows which
+    caller is local vs cloud) rather than guessed from the model-id string.
+    The enforcer gates each step on this class.
+    """
+
+    caller: LLMCaller
+    model_id: str
+    provider_class: str
 
 
 @dataclass(frozen=True)
@@ -82,16 +100,53 @@ SuggestOutcome = SuggestFieldsSuccess | DraftDegraded | DraftSchemaInvalid
 
 @dataclass
 class AssistService:
-	"""Bundles the LLM caller the draft pipeline needs (injected for tests)."""
+	"""Bundles the LLM caller the draft pipeline needs (injected for tests).
+
+	Two modes:
+	  * **Policy mode** (production) — ``enforcer`` + ``steps`` are set. Each
+	    draft tries the ordered steps, SKIPPING any whose ``provider_class``
+	    the tenant's tier forbids, so an ``ollama_only`` tenant never reaches a
+	    cloud step (CLAUDE §2). First success wins; all-skipped/all-failed
+	    degrades cleanly.
+	  * **Legacy mode** (tests / single-provider) — only ``llm`` is set; the
+	    single caller is used with no policy gate.
+	"""
 
 	llm: LLMCaller = field(default_factory=StubLLMCaller)
+	enforcer: PolicyEnforcer | None = None
+	steps: list[ProviderStep] | None = None
+
+	def _invoke(self, *, tenant_id: str, model_id: str, prompt: str) -> LLMResponse:
+		"""Call the LLM, enforcing per-tenant provider-class policy when wired.
+
+		Raises :class:`AllProvidersUnavailable` if every allowed step fails or
+		all steps are policy-skipped — each public method already maps that to
+		a clean ``DraftDegraded``.
+		"""
+		if self.enforcer is not None and self.steps is not None:
+			errors: list[tuple[str, str]] = []
+			for step in self.steps:
+				if not self.enforcer.provider_class_allowed(tenant_id, step.provider_class):
+					logger.info(
+						"assist: tenant %s tier forbids provider_class %s — skipping step %s",
+						tenant_id, step.provider_class, step.model_id,
+					)
+					continue
+				try:
+					return step.caller.call(model_id=step.model_id, prompt=prompt)
+				except Exception as e:  # noqa: BLE001 - any failure advances the chain
+					errors.append((step.model_id, f"{type(e).__name__}: {e}"))
+					logger.warning("assist provider %s failed, trying next: %s", step.model_id, e)
+					continue
+			raise AllProvidersUnavailable(errors)
+		return self.llm.call(model_id=model_id, prompt=prompt)
 
 	def draft_email(self, request: DraftEmailRequest) -> DraftOutcome:
 		model_id = request.model_id or DEFAULT_MODEL_ID
 		prompt = build_draft_email_prompt(request)
 
 		try:
-			llm_response = self.llm.call(model_id=model_id, prompt=prompt)
+			llm_response = self._invoke(tenant_id=request.tenant_id, model_id=model_id, prompt=prompt)
 		except AllProvidersUnavailable as e:
 			emit(
 				"warn", "assist.draft_email.degraded",
@@ -136,7 +191,7 @@ class AssistService:
 		prompt = build_draft_note_prompt(request)
 
 		try:
-			llm_response = self.llm.call(model_id=model_id, prompt=prompt)
+			llm_response = self._invoke(tenant_id=request.tenant_id, model_id=model_id, prompt=prompt)
 		except AllProvidersUnavailable as e:
 			emit(
 				"warn", "assist.draft_note.degraded",
@@ -179,7 +234,7 @@ class AssistService:
 		allowed = {f.fieldname for f in request.fields}
 
 		try:
-			llm_response = self.llm.call(model_id=model_id, prompt=prompt)
+			llm_response = self._invoke(tenant_id=request.tenant_id, model_id=model_id, prompt=prompt)
 		except AllProvidersUnavailable as e:
 			emit(
 				"warn", "assist.suggest_fields.degraded",
@@ -218,6 +273,7 @@ class AssistService:
 __all__ = (
 	"AssistService",
 	"DEFAULT_MODEL_ID",
+	"ProviderStep",
 	"DraftDegraded",
 	"DraftEmailSuccess",
 	"DraftNoteSuccess",

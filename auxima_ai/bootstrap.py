@@ -27,12 +27,10 @@ import logging
 from pathlib import Path
 
 from auxima_ai.activity.http_emitter import HTTPActivityEmitter
-from auxima_ai.assist.fallback import FallbackLLMCaller
 from auxima_ai.assist.openrouter import OpenRouterError, OpenRouterLLMCaller
 from auxima_ai.assist.router import set_assist_service
-from auxima_ai.assist.service import AssistService
+from auxima_ai.assist.service import AssistService, ProviderStep
 from auxima_ai.config import Settings, get_settings
-from auxima_ai.intake.llm import LLMCaller
 from auxima_ai.intake.ollama import OllamaLLMCaller
 from auxima_ai.intake.router import set_intake_service
 from auxima_ai.intake.service import (
@@ -102,37 +100,47 @@ def _build_activity_emitter(settings: Settings) -> ActivityEmitter:
     return NullActivityEmitter()
 
 
-def build_assist_service(settings: Settings) -> AssistService:
-    """Build the assist.draft-email service with a provider fallback chain.
+def build_assist_service(
+    settings: Settings, enforcer: PolicyEnforcer | None = None
+) -> AssistService:
+    """Build the assist service with an **Ollama-first**, policy-gated chain.
 
-    Chain order (first success wins): OpenRouter (free/cloud, per dev request)
-    then local Ollama (reliable). The OpenRouter step is included only if an
-    ``OPENROUTER_API_KEY`` is present — otherwise we'd raise at startup for a
-    key the operator may not have wired yet; skipping it degrades to Ollama-only
-    rather than refusing to serve. If neither can be built the chain is empty
-    and every draft request returns a clean ``DraftDegraded`` (never a 500).
+    Chain order follows CLAUDE §2 (self-hosted is the default): local Ollama
+    FIRST, then OpenRouter (free cloud) as an opt-in fallback included ONLY if
+    an ``OPENROUTER_API_KEY`` is present. The :class:`PolicyEnforcer` gates each
+    step on the tenant's tier, so an ``ollama_only`` tenant never reaches the
+    cloud step even when it is wired. If no step is allowed/available every
+    draft degrades cleanly (never a 500).
+
+    ``enforcer`` is shared with the intake service so tenant policies registered
+    once apply to both paths; a fresh one is created if not supplied.
 
     Pure (no global mutation) so tests drive it deterministically.
     """
-    steps: list[tuple[LLMCaller, str]] = []
-    try:
-        steps.append(
-            (OpenRouterLLMCaller(), settings.assist_openrouter_model)
-        )
-    except OpenRouterError as e:
-        # No API key (or bad config) — skip the cloud step, keep local Ollama.
-        logger.warning("bootstrap: OpenRouter assist step skipped (%s); using Ollama only", e)
-    steps.append(
-        (
-            OllamaLLMCaller(
+    enforcer = enforcer or PolicyEnforcer()
+    steps: list[ProviderStep] = [
+        ProviderStep(
+            caller=OllamaLLMCaller(
                 base_url=settings.ollama_base_url,
                 timeout_seconds=settings.assist_ollama_timeout_s,
             ),
-            settings.assist_ollama_model,
+            model_id=settings.assist_ollama_model,
+            provider_class="self-hosted",
         )
-    )
-    logger.info("bootstrap: assist chain wired with %d provider step(s)", len(steps))
-    return AssistService(llm=FallbackLLMCaller(steps=steps))
+    ]
+    try:
+        steps.append(
+            ProviderStep(
+                caller=OpenRouterLLMCaller(),
+                model_id=settings.assist_openrouter_model,
+                provider_class="free-cloud",
+            )
+        )
+    except OpenRouterError as e:
+        # No API key (or bad config) — skip the opt-in cloud step; Ollama-only.
+        logger.warning("bootstrap: OpenRouter assist step skipped (%s); Ollama-only", e)
+    logger.info("bootstrap: assist chain wired Ollama-first with %d provider step(s)", len(steps))
+    return AssistService(enforcer=enforcer, steps=steps)
 
 
 def bootstrap_app(settings: Settings | None = None) -> IntakeService:
@@ -144,7 +152,8 @@ def bootstrap_app(settings: Settings | None = None) -> IntakeService:
     s = settings or get_settings()
     service = build_intake_service(s)
     set_intake_service(service)
-    set_assist_service(build_assist_service(s))
+    # Share the intake enforcer so a tenant's tier/policy applies to BOTH paths.
+    set_assist_service(build_assist_service(s, enforcer=service.enforcer))
     return service
 
 

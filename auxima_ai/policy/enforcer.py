@@ -258,6 +258,32 @@ class PolicyEnforcer:
                 f"no policy registered for tenant {tenant_id!r}"
             ) from e
 
+    # -- tier-only gate (no cost/rate side effects) ------------------------
+
+    def provider_class_allowed(self, tenant_id: str, provider_class: str) -> bool:
+        """Pure tier check: may this tenant use this ``provider_class`` now?
+
+        Unlike :meth:`try_authorize` this consumes no rate token and touches
+        no ledger — it answers only the CLAUDE §2 egress question (does the
+        tenant's tier permit self-hosted / free-cloud / paid-cloud?). The
+        assist fallback uses it to SKIP cloud steps for an ``ollama_only``
+        tenant before any bytes leave the process.
+
+        **Fail-closed:** an unregistered tenant is treated as the most
+        restrictive policy (self-hosted only) — assist can still draft via
+        Ollama, but never egresses to cloud for a tenant whose policy we
+        cannot confirm.
+        """
+        try:
+            tier = self.policy_for(tenant_id).tier
+        except UnknownTenantError:
+            logger.warning(
+                "policy: no policy for tenant %r — failing closed to self-hosted only",
+                tenant_id,
+            )
+            return provider_class == "self-hosted"
+        return _policy_allows(tier, provider_class)
+
     # -- authorise ---------------------------------------------------------
 
     def try_authorize(
