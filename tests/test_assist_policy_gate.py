@@ -39,11 +39,11 @@ class SpyCaller:
 		)
 
 
-def _enforcer(tenant_id: str | None, tier: TierPolicy | None) -> PolicyEnforcer:
+def _enforcer(tenant_id: str | None, tier: TierPolicy | None, region: str = "KSA") -> PolicyEnforcer:
 	e = PolicyEnforcer()
 	if tenant_id is not None and tier is not None:
 		e.set_policy(TenantPolicy(
-			tenant_id=tenant_id, tier=tier,
+			tenant_id=tenant_id, tier=tier, region=region,
 			monthly_ceiling=Decimal("100"), rate_capacity=1000.0, rate_refill_per_second=100.0,
 		))
 	return e
@@ -86,10 +86,12 @@ def test_unknown_tenant_fails_closed_to_local():
 
 
 def test_free_cloud_tenant_falls_through_to_cloud_when_ollama_down():
+	# region="INTL": cloud fallthrough is only lawful for a non-in-Kingdom
+	# tenant. A KSA tenant would be residency-blocked (test_residency_invariant).
 	local = SpyCaller(fail=True)
 	cloud = SpyCaller(payload={"subject": "CLOUD", "body": "cloud body"})
 	svc = AssistService(
-		enforcer=_enforcer("t2", TierPolicy.OLLAMA_THEN_FREE_CLOUD),
+		enforcer=_enforcer("t2", TierPolicy.OLLAMA_THEN_FREE_CLOUD, region="INTL"),
 		steps=[
 			ProviderStep(local, "ollama/llama3.1:8b", "self-hosted"),  # Ollama-first, fails
 			ProviderStep(cloud, "cloud/gemma:free", "free-cloud"),
@@ -100,6 +102,25 @@ def test_free_cloud_tenant_falls_through_to_cloud_when_ollama_down():
 	assert out.response.subject == "CLOUD"
 	assert local.calls == ["ollama/llama3.1:8b"]  # tried first
 	assert cloud.calls == ["cloud/gemma:free"]     # tier permits the fallback
+
+
+def test_ksa_tenant_on_cloud_tier_is_residency_blocked_from_cloud():
+	"""ADR-GA2 fix #1 at the service layer: even MISCONFIGURED to a paid-cloud
+	tier, a KSA (in-Kingdom) tenant's assist call skips every cloud step and is
+	served in-Kingdom by Ollama (residency hard-invariant above the tier flag)."""
+	cloud = SpyCaller(payload={"subject": "CLOUD", "body": "cloud body"})
+	local = SpyCaller(payload={"subject": "LOCAL", "body": "local body"})
+	svc = AssistService(
+		enforcer=_enforcer("ksa-x", TierPolicy.OLLAMA_THEN_PAID_CLOUD, region="KSA"),
+		steps=[
+			ProviderStep(cloud, "cloud/gemma:free", "free-cloud"),   # listed FIRST
+			ProviderStep(local, "ollama/llama3.1:8b", "self-hosted"),
+		],
+	)
+	out = svc.draft_email(_req("ksa-x"))
+	assert isinstance(out, DraftEmailSuccess)
+	assert out.response.subject == "LOCAL"     # served in-Kingdom by Ollama
+	assert cloud.calls == []                   # residency-blocked despite paid-cloud tier
 
 
 def test_ollama_only_with_only_a_cloud_step_degrades_cleanly():

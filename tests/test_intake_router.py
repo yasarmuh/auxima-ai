@@ -48,9 +48,12 @@ def _policy(
     ceiling: Decimal = Decimal("100"),
     capacity: float = 1000.0,
     refill: float = 100.0,
+    # Non-in-Kingdom by default so cloud/ceiling mechanism tests reach the cloud
+    # path; the KSA residency invariant is covered by test_residency_invariant.py.
+    region: str = "INTL",
 ) -> TenantPolicy:
     return TenantPolicy(
-        tenant_id=tenant, tier=tier, monthly_ceiling=ceiling,
+        tenant_id=tenant, tier=tier, region=region, monthly_ceiling=ceiling,
         rate_capacity=capacity, rate_refill_per_second=refill,
     )
 

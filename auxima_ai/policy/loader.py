@@ -63,6 +63,10 @@ class TenantEntry(_Strict):
 
     tenant_id: str = Field(..., min_length=1, max_length=128)
     tier: TierPolicy
+    #: Residency region; defaults to in-Kingdom KSA (fail-closed — a tenant
+    #: omitting it is cloud-blocked regardless of tier, ADR-GA2). Set a
+    #: non-in-Kingdom code (e.g. "UAE") to permit the tier's cloud path.
+    region: str = Field(default="KSA", min_length=1, max_length=32)
     monthly_ceiling: str = Field(
         ...,
         description=(
@@ -114,6 +118,7 @@ class TenantEntry(_Strict):
         return TenantPolicy(
             tenant_id=self.tenant_id,
             tier=self.tier,
+            region=self.region,
             monthly_ceiling=Decimal(self.monthly_ceiling),
             rate_capacity=self.rate_capacity,
             rate_refill_per_second=self.rate_refill_per_second,

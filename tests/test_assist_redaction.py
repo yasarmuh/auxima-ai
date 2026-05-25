@@ -39,10 +39,10 @@ class PromptSpy:
 		)
 
 
-def _enforcer(tenant_id: str, tier: TierPolicy) -> PolicyEnforcer:
+def _enforcer(tenant_id: str, tier: TierPolicy, region: str = "KSA") -> PolicyEnforcer:
 	e = PolicyEnforcer()
 	e.set_policy(TenantPolicy(
-		tenant_id=tenant_id, tier=tier,
+		tenant_id=tenant_id, tier=tier, region=region,
 		monthly_ceiling=Decimal("100"), rate_capacity=1000.0, rate_refill_per_second=100.0,
 	))
 	return e
@@ -60,7 +60,9 @@ def test_cloud_step_receives_redacted_prompt():
 	local = PromptSpy(fail=True)        # Ollama down -> chain advances to cloud
 	cloud = PromptSpy()
 	svc = AssistService(
-		enforcer=_enforcer("t1", TierPolicy.OLLAMA_THEN_FREE_CLOUD),
+		# region="INTL": a cloud step is only reachable for a non-in-Kingdom
+		# tenant; a KSA tenant is residency-blocked (test_residency_invariant).
+		enforcer=_enforcer("t1", TierPolicy.OLLAMA_THEN_FREE_CLOUD, region="INTL"),
 		steps=[
 			ProviderStep(local, "ollama/llama3.1:8b", "self-hosted"),
 			ProviderStep(cloud, "cloud/gemma:free", "free-cloud"),

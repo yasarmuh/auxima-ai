@@ -84,6 +84,14 @@ _FREE_CLOUD_PROVIDERS: Final[frozenset[str]] = frozenset({"gemini"})
 _PAID_CLOUD_PROVIDERS: Final[frozenset[str]] = frozenset({"openai", "anthropic"})
 _SELF_HOSTED_PROVIDERS: Final[frozenset[str]] = frozenset({"ollama"})
 
+#: Regions whose residency rules require in-Kingdom inference. A tenant in one
+#: of these regions may use SELF-HOSTED providers only — no cloud egress —
+#: regardless of its tier flag or whether a cloud API key is set. This is the
+#: KSA data-residency hard-invariant ABOVE the tier policy (ADR-GA2:
+#: Insurance Market Code of Conduct localizes customer PII in-Kingdom; PDPL
+#: Transfer Regulation has no published adequacy list). Compared upper-cased.
+_IN_KINGDOM_REGIONS: Final[frozenset[str]] = frozenset({"KSA", "SA"})
+
 
 def _classify_provider(provider: str) -> str:
     """Return one of ``self-hosted`` / ``free-cloud`` / ``paid-cloud`` / ``unknown``."""
@@ -94,6 +102,24 @@ def _classify_provider(provider: str) -> str:
     if provider in _PAID_CLOUD_PROVIDERS:
         return "paid-cloud"
     return "unknown"
+
+
+def _is_in_kingdom(region: str) -> bool:
+    """True if ``region`` is an in-Kingdom residency region (case-insensitive)."""
+    return region.strip().upper() in _IN_KINGDOM_REGIONS
+
+
+def _residency_allows(region: str, provider_class: str) -> bool:
+    """Region hard-invariant — does ``region`` permit ``provider_class``?
+
+    In-Kingdom regions (KSA) permit **self-hosted only**: every cloud
+    provider_class is refused regardless of the tenant's tier. Non-in-Kingdom
+    regions impose no residency restriction (the tier policy governs). This sits
+    ABOVE :func:`_policy_allows`; a call is permitted only if BOTH gates pass.
+    """
+    if provider_class == "self-hosted":
+        return True
+    return not _is_in_kingdom(region)
 
 
 def _policy_allows(tier: TierPolicy, provider_class: str) -> bool:
@@ -123,12 +149,19 @@ class TenantPolicy:
     monthly_ceiling: Decimal
     rate_capacity: float
     rate_refill_per_second: float
+    #: Residency region. Defaults to ``"KSA"`` (in-Kingdom) — fail-closed for
+    #: the Phase-1 KSA-only market: an unmarked tenant is treated as in-Kingdom
+    #: and cloud-blocked regardless of tier (ADR-GA2). A tenant that should be
+    #: allowed a cloud tier MUST be explicitly marked a non-in-Kingdom region.
+    region: str = "KSA"
 
     def __post_init__(self) -> None:
         if not isinstance(self.tenant_id, str) or not self.tenant_id:
             raise PolicyError("tenant_id must be a non-empty string")
         if not isinstance(self.tier, TierPolicy):
             raise PolicyError(f"tier must be TierPolicy; got {type(self.tier).__name__}")
+        if not isinstance(self.region, str) or not self.region.strip():
+            raise PolicyError("region must be a non-empty string")
         if not isinstance(self.monthly_ceiling, Decimal):
             raise PolicyError("monthly_ceiling must be Decimal")
         if self.monthly_ceiling.is_nan() or self.monthly_ceiling < 0:
@@ -269,20 +302,28 @@ class PolicyEnforcer:
         assist fallback uses it to SKIP cloud steps for an ``ollama_only``
         tenant before any bytes leave the process.
 
-        **Fail-closed:** an unregistered tenant is treated as the most
-        restrictive policy (self-hosted only) — assist can still draft via
-        Ollama, but never egresses to cloud for a tenant whose policy we
-        cannot confirm.
+        **Fail-closed (two ways):** (1) an unregistered tenant is treated as the
+        most restrictive policy (self-hosted only); (2) an in-Kingdom (KSA)
+        tenant is refused every cloud provider_class regardless of its tier —
+        the residency hard-invariant (ADR-GA2). Both let assist still draft via
+        Ollama, but never egress to cloud.
         """
         try:
-            tier = self.policy_for(tenant_id).tier
+            policy = self.policy_for(tenant_id)
         except UnknownTenantError:
             logger.warning(
                 "policy: no policy for tenant %r — failing closed to self-hosted only",
                 tenant_id,
             )
             return provider_class == "self-hosted"
-        return _policy_allows(tier, provider_class)
+        if not _residency_allows(policy.region, provider_class):
+            logger.warning(
+                "policy: residency invariant — in-Kingdom tenant %r (region %s) "
+                "refused %s provider_class regardless of tier %s (ADR-GA2)",
+                tenant_id, policy.region, provider_class, policy.tier.value,
+            )
+            return False
+        return _policy_allows(policy.tier, provider_class)
 
     # -- authorise ---------------------------------------------------------
 
@@ -319,7 +360,18 @@ class PolicyEnforcer:
                 model_id=model_id,
                 provider=pricing.provider,
             )
-        if not _policy_allows(policy.tier, provider_class):
+        # Residency hard-invariant (ADR-GA2) sits ABOVE the tier gate: an
+        # in-Kingdom tenant is refused every cloud provider_class regardless of
+        # tier or API-key presence. Reuses ProviderNotAllowed (intake already
+        # maps it to a clean denial) + a residency-specific WARNING for audit.
+        residency_ok = _residency_allows(policy.region, provider_class)
+        if not residency_ok:
+            logger.warning(
+                "policy: residency invariant — in-Kingdom tenant %r (region %s) "
+                "refused %s model %r regardless of tier %s (ADR-GA2)",
+                tenant_id, policy.region, provider_class, model_id, policy.tier.value,
+            )
+        if not residency_ok or not _policy_allows(policy.tier, provider_class):
             return ProviderNotAllowed(
                 tenant_id=tenant_id,
                 model_id=model_id,
