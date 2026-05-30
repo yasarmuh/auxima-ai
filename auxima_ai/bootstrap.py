@@ -32,6 +32,8 @@ from auxima_ai.assist.router import set_assist_service
 from auxima_ai.assist.service import AssistService, ProviderStep
 from auxima_ai.config import Settings, get_settings
 from auxima_ai.intake.ollama import OllamaLLMCaller
+from auxima_ai.intake.quote_router import set_quote_intake_service
+from auxima_ai.intake.quote_service import QuoteIntakeService
 from auxima_ai.intake.router import set_intake_service
 from auxima_ai.intake.service import (
     ActivityEmitter,
@@ -152,6 +154,18 @@ def bootstrap_app(settings: Settings | None = None) -> IntakeService:
     s = settings or get_settings()
     service = build_intake_service(s)
     set_intake_service(service)
+    # The quote-intake (P1-10) path shares the intake service's enforcer, LLM
+    # caller, and activity emitter, so tenant policies + the Ollama pool + the
+    # CRM §4 emitter are wired once and apply to both. PDF extraction defaults to
+    # pypdf; OCR is the NullOcrEngine seam until a Tesseract/PaddleOCR engine is
+    # wired (scanned PDFs route to Failed until then — never a silent empty).
+    set_quote_intake_service(
+        QuoteIntakeService(
+            enforcer=service.enforcer,
+            llm=service.llm,
+            activity_emitter=service.activity_emitter,
+        )
+    )
     # Share the intake enforcer so a tenant's tier/policy applies to BOTH paths.
     set_assist_service(build_assist_service(s, enforcer=service.enforcer))
     return service

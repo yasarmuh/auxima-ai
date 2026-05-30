@@ -43,6 +43,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from auxima_ai.intake.delimit import markers_for, neutralise_untrusted
 from auxima_ai.util.email import normalise_email
 from auxima_ai.util.phone import normalise_phone
 
@@ -160,8 +161,10 @@ class SchemaViolationError(PromptError):
 # the prompt stays byte-stable for cache parity; breakout is prevented by
 # STRIPPING any occurrence of these markers from the untrusted text (so the
 # attacker can never emit the real closing marker) — see _neutralise_untrusted.
-_UNTRUSTED_OPEN = "<<<UNTRUSTED_LEAD_TEXT>>>"
-_UNTRUSTED_CLOSE = "<<<END_UNTRUSTED_LEAD_TEXT>>>"
+# The delimiting mechanism is shared with quote_prompt.py via delimit.py; these
+# module-level aliases are kept for the public injection tests + byte stability.
+_UNTRUSTED_LABEL = "LEAD_TEXT"
+_UNTRUSTED_OPEN, _UNTRUSTED_CLOSE = markers_for(_UNTRUSTED_LABEL)
 
 _SYSTEM_INSTRUCTIONS = (
     "You extract structured fields from a single free-form insurance "
@@ -184,17 +187,12 @@ _UNTRUSTED_PREAMBLE = (
 
 
 def _neutralise_untrusted(text: str) -> str:
-    """Strip any occurrence of the block sentinels from untrusted text.
+    """Strip any occurrence of the block sentinels from untrusted lead text.
 
-    An attacker who embeds the exact closing marker would otherwise be able
-    to end the data block early and have following text read as instructions.
-    Removing both markers means the text can never contain the delimiter that
-    closes its own block. Replaced with a visible redaction token rather than
-    silently deleted, so the model still sees that something was removed.
+    Thin wrapper over :func:`delimit.neutralise_untrusted` for the LEAD_TEXT
+    label — kept as a module-local name for readability + the existing tests.
     """
-    for marker in (_UNTRUSTED_OPEN, _UNTRUSTED_CLOSE):
-        text = text.replace(marker, "[removed-delimiter]")
-    return text
+    return neutralise_untrusted(text, label=_UNTRUSTED_LABEL)
 
 
 def build_intake_extract_prompt(lead_text: str) -> str:

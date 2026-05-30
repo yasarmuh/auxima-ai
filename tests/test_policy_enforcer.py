@@ -47,10 +47,15 @@ def _policy(
     monthly_ceiling: Decimal = Decimal("100.00"),
     rate_capacity: float = 1000.0,
     rate_refill_per_second: float = 100.0,
+    # Default to a non-in-Kingdom region so these tier/ceiling mechanism tests
+    # exercise the cloud path. The KSA fail-closed residency invariant (cloud
+    # blocked regardless of tier) is covered by tests/test_residency_invariant.py.
+    region: str = "INTL",
 ) -> TenantPolicy:
     return TenantPolicy(
         tenant_id=tenant_id,
         tier=tier,
+        region=region,
         monthly_ceiling=monthly_ceiling,
         rate_capacity=rate_capacity,
         rate_refill_per_second=rate_refill_per_second,

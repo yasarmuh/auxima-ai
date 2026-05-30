@@ -19,6 +19,12 @@ from typing import Final
 #: Engineering placeholder — NOT the regulatory bar (GAP-1, user-owned).
 DEFAULT_CONFIDENCE_THRESHOLD: Final[float] = 0.8
 
+#: At/above this many extracted non-whitespace characters the length factor is
+#: 1.0 (the model's self-confidence is trusted as-is). Below it, confidence is
+#: scaled down linearly so a near-empty extraction can never auto-accept — this
+#: is the §4.2 "garbage-but-high-confidence is impossible" guarantee (GAP-7/12).
+MIN_RELIABLE_TEXT_CHARS: Final[int] = 200
+
 
 class ConfidenceError(ValueError):
     """Invalid confidence score or threshold (out of [0,1] or non-finite)."""
@@ -55,6 +61,40 @@ def _validate_unit_interval(name: str, value: object) -> float:
     return v
 
 
+def compute_confidence(
+    model_confidence: float,
+    extracted_text_chars: int,
+    *,
+    min_reliable_chars: int = MIN_RELIABLE_TEXT_CHARS,
+) -> float:
+    """Combine the model's self-confidence with an extracted-text-length factor.
+
+    ``final = model_confidence * length_factor`` where
+    ``length_factor = min(1.0, extracted_text_chars / min_reliable_chars)``.
+
+    This is the "defined function whose inputs include the extracted-text
+    length" the AC requires (§P1-10, GAP-7/12): a model that returns high
+    self-confidence over an empty/near-empty extraction is scaled below the
+    auto-accept bar, so garbage-but-high-confidence is impossible. The result
+    is always a finite float in ``[0, 1]``.
+
+    Raises :class:`ConfidenceError` on a non-unit-interval ``model_confidence``,
+    a negative char count, or a non-positive ``min_reliable_chars`` (fail loud —
+    a bad input must never silently produce an auto-accept).
+    """
+    mc = _validate_unit_interval("model_confidence", model_confidence)
+    if isinstance(extracted_text_chars, bool) or not isinstance(extracted_text_chars, int):
+        raise ConfidenceError(
+            f"extracted_text_chars must be an int; got {type(extracted_text_chars).__name__}"
+        )
+    if extracted_text_chars < 0:
+        raise ConfidenceError(f"extracted_text_chars must be >= 0; got {extracted_text_chars}")
+    if min_reliable_chars <= 0:
+        raise ConfidenceError(f"min_reliable_chars must be > 0; got {min_reliable_chars}")
+    length_factor = min(1.0, extracted_text_chars / min_reliable_chars)
+    return mc * length_factor
+
+
 def decide(
     score: float, *, threshold: float = DEFAULT_CONFIDENCE_THRESHOLD
 ) -> ConfidenceDecision:
@@ -71,9 +111,11 @@ def decide(
 
 __all__ = (
     "DEFAULT_CONFIDENCE_THRESHOLD",
+    "MIN_RELIABLE_TEXT_CHARS",
     "AutoAccept",
     "ConfidenceDecision",
     "ConfidenceError",
     "HoldForReview",
+    "compute_confidence",
     "decide",
 )
