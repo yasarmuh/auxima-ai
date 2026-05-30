@@ -391,6 +391,13 @@ class QuoteIntakeService:
                 return self._doc_failed(
                     request, "no_text_layer_ocr_required", doc_class.value, trace_id, span_id
                 )
+            except Exception:
+                # A real OCR engine (Tesseract/PaddleOCR) can fail many ways (binary
+                # crash, OOM). Fail closed to a typed doc failure rather than a 500
+                # that skips the structured failure path (M-3).
+                return self._doc_failed(
+                    request, "ocr_failed", doc_class.value, trace_id, span_id
+                )
             if ocr_text.char_count == 0:
                 return self._doc_failed(
                     request, "no_text_extracted", doc_class.value, trace_id, span_id

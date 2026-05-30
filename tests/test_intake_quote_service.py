@@ -187,6 +187,25 @@ def test_no_text_layer_without_ocr_routes_to_failed() -> None:
 # --- OCR seam ---------------------------------------------------------------
 
 
+class _ExplodingOcrEngine:
+    """An 'available' OCR engine whose ocr() raises a non-OcrUnavailable error."""
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def ocr(self, data: bytes):  # noqa: ARG002
+        raise RuntimeError("tesseract segfault")
+
+
+def test_ocr_engine_crash_fails_closed() -> None:
+    # A real OCR engine crashing must route to a typed doc failure, not a 500 (M-3).
+    svc = _service(pdf_extractor=StubPdfTextExtractor(text="x"), ocr_engine=_ExplodingOcrEngine())
+    out = svc.extract_quote(_req(), idempotency_key="q-ocrboom", now=TS)
+    assert isinstance(out, QuoteDocumentFailed)
+    assert out.reason == "ocr_failed"
+
+
 def test_scanned_pdf_with_ocr_engine_succeeds() -> None:
     svc = _service(
         pdf_extractor=StubPdfTextExtractor(text="x"),  # no native text layer
