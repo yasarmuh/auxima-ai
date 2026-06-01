@@ -143,6 +143,26 @@ _SEED_TABLE: Final[Mapping[str, ModelPricing]] = {
         prompt_per_million=Decimal("0.15"),
         completion_per_million=Decimal("0.60"),
     ),
+    # --- OpenRouter (ADR-GA3 contracted egress path) ----------------------
+    # This curated set IS the model allow-list (ADR-GA3 §4.5): only models
+    # registered here can be priced, and an unregistered model_id is refused
+    # loudly by `pricing_for` (UnknownModelError) before any call. The
+    # enforcer additionally restricts an approved in-Kingdom tenant to the
+    # `openrouter` provider only. Prices are OpenRouter list references as of
+    # 2026-05 — OPS MUST re-verify quarterly and update via register_pricing();
+    # they affect only the cost ledger, not the egress gate.
+    "openrouter/qwen/qwen-2.5-72b-instruct": ModelPricing(
+        model_id="openrouter/qwen/qwen-2.5-72b-instruct",
+        provider="openrouter",
+        prompt_per_million=Decimal("0.13"),
+        completion_per_million=Decimal("0.40"),
+    ),
+    "openrouter/meta-llama/llama-3.1-8b-instruct": ModelPricing(
+        model_id="openrouter/meta-llama/llama-3.1-8b-instruct",
+        provider="openrouter",
+        prompt_per_million=Decimal("0.02"),
+        completion_per_million=Decimal("0.03"),
+    ),
 }
 
 

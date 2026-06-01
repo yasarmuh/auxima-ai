@@ -76,6 +76,17 @@ def test_blocking_import_hook_refuses_dynamic_frappe():
 
     blocker = Blocker()
     sys.meta_path.insert(0, blocker)
+    # Snapshot the auxima_ai.* module objects BEFORE the destructive re-import.
+    # Without restoring them afterwards, a later fresh import mints NEW module
+    # objects (and NEW exception classes), so a test running after this one that
+    # compares an exception raised by an already-imported module against a
+    # freshly-imported class fails an `isinstance`/`pytest.raises` check despite
+    # the types being "the same". Restore originals in the finally to keep
+    # module/class identity stable across the whole suite.
+    _saved = {
+        name: mod for name, mod in sys.modules.items()
+        if name == "auxima_ai" or name.startswith("auxima_ai.")
+    }
     try:
         # Re-import auxima_ai's modules — none of them should trigger the blocker.
         for mod_name in list(sys.modules):
@@ -87,3 +98,8 @@ def test_blocking_import_hook_refuses_dynamic_frappe():
         importlib.import_module("auxima_ai.auth")
     finally:
         sys.meta_path.remove(blocker)
+        # Drop any newly-minted modules and restore the original objects.
+        for mod_name in list(sys.modules):
+            if mod_name == "auxima_ai" or mod_name.startswith("auxima_ai."):
+                del sys.modules[mod_name]
+        sys.modules.update(_saved)

@@ -79,9 +79,11 @@ class TierPolicy(str, Enum):
 
 
 # Tags applied to ModelPricing.provider so the enforcer knows which
-# tier-policy gate the provider falls under.
+# tier-policy gate the provider falls under. OpenRouter is a PAID-cloud
+# aggregator (the ADR-GA3 contracted egress path) — it sits under the
+# paid-cloud tier gate, same as direct OpenAI/Anthropic.
 _FREE_CLOUD_PROVIDERS: Final[frozenset[str]] = frozenset({"gemini"})
-_PAID_CLOUD_PROVIDERS: Final[frozenset[str]] = frozenset({"openai", "anthropic"})
+_PAID_CLOUD_PROVIDERS: Final[frozenset[str]] = frozenset({"openai", "anthropic", "openrouter"})
 _SELF_HOSTED_PROVIDERS: Final[frozenset[str]] = frozenset({"ollama"})
 
 #: Regions whose residency rules require in-Kingdom inference. A tenant in one
@@ -91,6 +93,13 @@ _SELF_HOSTED_PROVIDERS: Final[frozenset[str]] = frozenset({"ollama"})
 #: Insurance Market Code of Conduct localizes customer PII in-Kingdom; PDPL
 #: Transfer Regulation has no published adequacy list). Compared upper-cased.
 _IN_KINGDOM_REGIONS: Final[frozenset[str]] = frozenset({"KSA", "SA"})
+
+#: The ONLY cloud providers an in-Kingdom tenant may egress to, and only when
+#: that tenant is explicitly `cloud_egress_approved` (ADR-GA3). The signed
+#: agreement is OpenRouter-specific, so a direct cloud provider (gemini/openai/
+#: anthropic) stays blocked for an in-Kingdom tenant even when approved — the
+#: relax is deliberately narrow to the contracted path. Compared lower-cased.
+_IN_KINGDOM_CLOUD_PROVIDERS: Final[frozenset[str]] = frozenset({"openrouter"})
 
 
 def _classify_provider(provider: str) -> str:
@@ -109,17 +118,49 @@ def _is_in_kingdom(region: str) -> bool:
     return region.strip().upper() in _IN_KINGDOM_REGIONS
 
 
-def _residency_allows(region: str, provider_class: str) -> bool:
-    """Region hard-invariant — does ``region`` permit ``provider_class``?
+def _residency_allows_class(
+    region: str, provider_class: str, cloud_egress_approved: bool,
+) -> bool:
+    """Coarse residency gate (provider_class only) — for the assist path.
 
-    In-Kingdom regions (KSA) permit **self-hosted only**: every cloud
-    provider_class is refused regardless of the tenant's tier. Non-in-Kingdom
-    regions impose no residency restriction (the tier policy governs). This sits
-    ABOVE :func:`_policy_allows`; a call is permitted only if BOTH gates pass.
+    In-Kingdom (KSA) regions permit **self-hosted always**; a cloud
+    provider_class is permitted only when the tenant is explicitly
+    ``cloud_egress_approved`` (ADR-GA3 — covered by the signed agreement).
+    A non-approved in-Kingdom tenant stays cloud-blocked (ADR-GA2 default).
+    Non-in-Kingdom regions impose no residency restriction (the tier governs).
+
+    This is provider_class-granular because the assist gate only knows the
+    class; the *specific* cloud provider used by assist is controlled by the
+    bootstrap step wiring (OpenRouter is the only cloud caller wired) plus
+    pre-egress PII redaction. The finer provider check lives in
+    :func:`_residency_allows_provider` for the model-id-aware intake path.
     """
     if provider_class == "self-hosted":
         return True
-    return not _is_in_kingdom(region)
+    if not _is_in_kingdom(region):
+        return True
+    return cloud_egress_approved
+
+
+def _residency_allows_provider(
+    region: str, provider: str, provider_class: str, cloud_egress_approved: bool,
+) -> bool:
+    """Fine residency gate (provider-granular) — for the intake/try_authorize path.
+
+    Same shape as :func:`_residency_allows_class` but, for an approved
+    in-Kingdom tenant, restricts cloud egress to the CONTRACTED providers
+    (:data:`_IN_KINGDOM_CLOUD_PROVIDERS` — OpenRouter only, per ADR-GA3). A
+    direct cloud provider (gemini/openai/anthropic) is refused for an
+    in-Kingdom tenant even when approved: the signed agreement is
+    OpenRouter-specific, so direct egress is out of its scope.
+    """
+    if provider_class == "self-hosted":
+        return True
+    if not _is_in_kingdom(region):
+        return True
+    if not cloud_egress_approved:
+        return False
+    return provider.strip().lower() in _IN_KINGDOM_CLOUD_PROVIDERS
 
 
 def _policy_allows(tier: TierPolicy, provider_class: str) -> bool:
@@ -154,6 +195,13 @@ class TenantPolicy:
     #: and cloud-blocked regardless of tier (ADR-GA2). A tenant that should be
     #: allowed a cloud tier MUST be explicitly marked a non-in-Kingdom region.
     region: str = "KSA"
+    #: Whether this tenant is covered by the OpenRouter egress agreement
+    #: (ADR-GA3). Defaults to ``False`` — fail-closed: a tenant NOT named in the
+    #: signed agreement gets no in-Kingdom cloud egress regardless of tier, even
+    #: to OpenRouter. Flipping it ``True`` (set per-tenant at onboarding) lifts
+    #: the residency gate for the contracted provider only; the tier flag still
+    #: caps independently and a direct cloud provider stays blocked.
+    cloud_egress_approved: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.tenant_id, str) or not self.tenant_id:
@@ -162,6 +210,8 @@ class TenantPolicy:
             raise PolicyError(f"tier must be TierPolicy; got {type(self.tier).__name__}")
         if not isinstance(self.region, str) or not self.region.strip():
             raise PolicyError("region must be a non-empty string")
+        if not isinstance(self.cloud_egress_approved, bool):
+            raise PolicyError("cloud_egress_approved must be a bool")
         if not isinstance(self.monthly_ceiling, Decimal):
             raise PolicyError("monthly_ceiling must be Decimal")
         if self.monthly_ceiling.is_nan() or self.monthly_ceiling < 0:
@@ -316,11 +366,14 @@ class PolicyEnforcer:
                 tenant_id,
             )
             return provider_class == "self-hosted"
-        if not _residency_allows(policy.region, provider_class):
+        if not _residency_allows_class(
+            policy.region, provider_class, policy.cloud_egress_approved,
+        ):
             logger.warning(
-                "policy: residency invariant — in-Kingdom tenant %r (region %s) "
-                "refused %s provider_class regardless of tier %s (ADR-GA2)",
-                tenant_id, policy.region, provider_class, policy.tier.value,
+                "policy: residency invariant — in-Kingdom tenant %r (region %s, "
+                "cloud_egress_approved=%s) refused %s provider_class (ADR-GA2/GA3)",
+                tenant_id, policy.region, policy.cloud_egress_approved,
+                provider_class,
             )
             return False
         return _policy_allows(policy.tier, provider_class)
@@ -364,12 +417,18 @@ class PolicyEnforcer:
         # in-Kingdom tenant is refused every cloud provider_class regardless of
         # tier or API-key presence. Reuses ProviderNotAllowed (intake already
         # maps it to a clean denial) + a residency-specific WARNING for audit.
-        residency_ok = _residency_allows(policy.region, provider_class)
+        residency_ok = _residency_allows_provider(
+            policy.region, pricing.provider, provider_class,
+            policy.cloud_egress_approved,
+        )
         if not residency_ok:
             logger.warning(
-                "policy: residency invariant — in-Kingdom tenant %r (region %s) "
-                "refused %s model %r regardless of tier %s (ADR-GA2)",
-                tenant_id, policy.region, provider_class, model_id, policy.tier.value,
+                "policy: residency invariant — in-Kingdom tenant %r (region %s, "
+                "cloud_egress_approved=%s) refused %s provider %r model %r "
+                "(ADR-GA2/GA3: cloud egress allowed only to the contracted "
+                "provider for an approved in-Kingdom tenant)",
+                tenant_id, policy.region, policy.cloud_egress_approved,
+                provider_class, pricing.provider, model_id,
             )
         if not residency_ok or not _policy_allows(policy.tier, provider_class):
             return ProviderNotAllowed(

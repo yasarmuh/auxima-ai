@@ -67,6 +67,11 @@ class TenantEntry(_Strict):
     #: omitting it is cloud-blocked regardless of tier, ADR-GA2). Set a
     #: non-in-Kingdom code (e.g. "UAE") to permit the tier's cloud path.
     region: str = Field(default="KSA", min_length=1, max_length=32)
+    #: Whether this tenant is covered by the OpenRouter egress agreement
+    #: (ADR-GA3). Defaults to ``False`` (fail-closed) — only a tenant the
+    #: signed agreement names is set ``true``, which lifts the in-Kingdom
+    #: residency gate for OpenRouter only (the tier flag still caps).
+    cloud_egress_approved: bool = Field(default=False)
     monthly_ceiling: str = Field(
         ...,
         description=(
@@ -122,6 +127,7 @@ class TenantEntry(_Strict):
             monthly_ceiling=Decimal(self.monthly_ceiling),
             rate_capacity=self.rate_capacity,
             rate_refill_per_second=self.rate_refill_per_second,
+            cloud_egress_approved=self.cloud_egress_approved,
         )
 
 
