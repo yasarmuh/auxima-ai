@@ -104,6 +104,19 @@ def test_missing_idempotency_key_is_422(client_with_service) -> None:
     assert r.status_code == 422
 
 
+def test_unsanctioned_model_id_is_422_not_500(client_with_service) -> None:
+    """H-1: a client-supplied model_id we don't run is a clean 422 at the edge — never a 500,
+    and never reaches the enforcer/LLM. Auth + idempotency key are valid so only model_id is bad."""
+    client = client_with_service(_build_service())
+    r = client.post(
+        "/v1/intake/extract-quote",
+        json=_body(model_id="bogus/unsanctioned-model"),
+        headers={**AUTH_HEADER, "Idempotency-Key": "q-badmodel"},
+    )
+    assert r.status_code == 422
+    assert "model_id" in r.text and "sanctioned" in r.text
+
+
 def test_success_200_with_confidence_and_decision(client_with_service) -> None:
     client = client_with_service(_build_service())
     r = client.post("/v1/intake/extract-quote", json=_body(),

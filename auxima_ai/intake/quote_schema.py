@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from auxima_ai.cost.pricing import known_models
 
 #: ~25 MB raw PDF (the §4.2 / S-46 cap) is ~34 MB base64. Cap the encoded string
 #: a little above that so an oversized upload is rejected at the edge before the
@@ -29,6 +31,25 @@ class QuoteIntakeRequest(BaseModel):
     tenant_id: str = Field(..., min_length=1, max_length=128)
     document_b64: str = Field(..., min_length=1, max_length=_MAX_DOCUMENT_B64_CHARS)
     model_id: str = Field(default="ollama/qwen2.5:32b", min_length=1)
+
+    @field_validator("model_id")
+    @classmethod
+    def _model_id_is_sanctioned(cls, v: str) -> str:
+        """Reject an unsanctioned model_id at the wire edge (P1-10 H-1, defense-in-depth).
+
+        ``model_id`` is client-supplied, so it is a client error — not a server fault — to
+        pass one we do not run. The allow-list is the pricing table's :func:`known_models`
+        (the single source of truth). Without this, an unknown id raises UnknownModelError
+        deep in the enforcer and surfaces as a 500; here it is a clean 422 before any
+        document download/classification. The residency enforcer (ADR-GA2/GA3) remains the
+        backstop that governs WHICH sanctioned model a given tenant may egress to.
+        """
+        allowed = known_models()
+        if v not in allowed:
+            raise ValueError(
+                f"model_id {v!r} is not a sanctioned model; known: {sorted(allowed)}"
+            )
+        return v
 
 
 class QuoteIntakeResponse(BaseModel):
