@@ -245,6 +245,51 @@ class RecommendationResponse(BaseModel):
 	latency_ms: int = 0
 
 
+# --- NLP wording-diff (WT-G10, step-09 enrichment) ----------------------------------------
+
+
+class WordingOffer(BaseModel):
+	"""One insurer's offer wording / key terms to compare."""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	insurer: str = Field(..., min_length=1, max_length=200)
+	wording: str = Field(..., min_length=1, max_length=8000, description="Clause text / key terms.")
+
+
+class WordingDiffRequest(BaseModel):
+	"""Body of ``POST /v1/assist/wording-diff`` — needs >=2 offers to compare."""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	tenant_id: str = Field(..., min_length=1, max_length=128)
+	offers: list[WordingOffer] = Field(..., min_length=2, max_length=8)
+	language: str = Field("en", pattern="^(en|ar)$")
+	model_id: str | None = Field(None, max_length=128)
+
+
+class WordingDiffFields(BaseModel):
+	"""LLM shape — two flat string lists (robust contract, low schema-violation risk)."""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	differences: list[str] = Field(..., min_length=1, max_length=20)
+	flags: list[str] = Field(default_factory=list, max_length=10)
+
+
+class WordingDiffResponse(BaseModel):
+	model_config = ConfigDict(extra="forbid")
+
+	differences: list[str]
+	flags: list[str]
+	language: str
+	degraded: bool = False
+	model_version: str = ""
+	prompt_tokens: int = 0
+	completion_tokens: int = 0
+	latency_ms: int = 0
+
+
 __all__ = (
 	"DraftEmailFields",
 	"DraftEmailRequest",
@@ -261,4 +306,8 @@ __all__ = (
 	"StyleExample",
 	"SuggestFieldsRequest",
 	"SuggestFieldsResponse",
+	"WordingDiffFields",
+	"WordingDiffRequest",
+	"WordingDiffResponse",
+	"WordingOffer",
 )

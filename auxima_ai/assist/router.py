@@ -25,6 +25,8 @@ from auxima_ai.assist.schema import (
 	RecommendationResponse,
 	SuggestFieldsRequest,
 	SuggestFieldsResponse,
+	WordingDiffRequest,
+	WordingDiffResponse,
 )
 from auxima_ai.assist.service import (
 	AssistService,
@@ -34,6 +36,7 @@ from auxima_ai.assist.service import (
 	DraftSchemaInvalid,
 	RecommendationSuccess,
 	SuggestFieldsSuccess,
+	WordingDiffSuccess,
 )
 
 _service_singleton: AssistService | None = None
@@ -214,6 +217,42 @@ def draft_recommendation(
 	raise AssertionError(f"unhandled recommendation outcome: {type(outcome).__name__}")  # pragma: no cover
 
 
+@router.post(
+	"/wording-diff",
+	response_model=WordingDiffResponse,
+	summary="Diff insurer offer wordings → material differences + flags (WT-G10)",
+	responses={
+		200: {"description": "Material differences + client-flags"},
+		502: {"description": "Upstream model replied but not in the required shape"},
+		503: {"description": "All AI models unavailable"},
+	},
+)
+def wording_diff(
+	body: WordingDiffRequest,
+	service: AssistService = Depends(get_assist_service),
+):
+	"""Compare >=2 offer wordings; degrade cleanly if no model is available."""
+	outcome = service.wording_diff(body)
+
+	if isinstance(outcome, WordingDiffSuccess):
+		return JSONResponse(status_code=200, content=outcome.response.model_dump())
+
+	if isinstance(outcome, DraftDegraded):
+		return JSONResponse(
+			status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+			content={"detail": "AI is temporarily unavailable.", "degraded": True, "reason": outcome.reason},
+			headers={"Retry-After": "30"},
+		)
+
+	if isinstance(outcome, DraftSchemaInvalid):
+		return JSONResponse(
+			status_code=status.HTTP_502_BAD_GATEWAY,
+			content={"detail": "the AI model returned an unexpected format.", "errors": list(outcome.errors)},
+		)
+
+	raise AssertionError(f"unhandled wording-diff outcome: {type(outcome).__name__}")  # pragma: no cover
+
+
 __all__ = (
 	"draft_email",
 	"draft_note",
@@ -223,4 +262,5 @@ __all__ = (
 	"router",
 	"set_assist_service",
 	"suggest_fields",
+	"wording_diff",
 )

@@ -21,10 +21,12 @@ from auxima_ai.assist.prompts import (
 	build_draft_note_prompt,
 	build_recommendation_prompt,
 	build_suggest_fields_prompt,
+	build_wording_diff_prompt,
 	validate_draft_email_response,
 	validate_draft_note_response,
 	validate_recommendation_response,
 	validate_suggest_fields_response,
+	validate_wording_diff_response,
 )
 from auxima_ai.assist.schema import (
 	DraftEmailRequest,
@@ -37,6 +39,8 @@ from auxima_ai.assist.schema import (
 	RecommendationResponse,
 	SuggestFieldsRequest,
 	SuggestFieldsResponse,
+	WordingDiffRequest,
+	WordingDiffResponse,
 )
 from auxima_ai.intake.llm import LLMCaller, LLMResponse, StubLLMCaller
 from auxima_ai.observability.log import emit
@@ -111,6 +115,14 @@ class RecommendationSuccess:
 
 
 RecommendationOutcome = RecommendationSuccess | DraftDegraded | DraftSchemaInvalid
+
+
+@dataclass(frozen=True)
+class WordingDiffSuccess:
+	response: WordingDiffResponse
+
+
+WordingDiffOutcome = WordingDiffSuccess | DraftDegraded | DraftSchemaInvalid
 
 
 def _fmt_pct(p: float) -> str:
@@ -393,6 +405,49 @@ class AssistService:
 		)
 		return RecommendationSuccess(response=response)
 
+	def wording_diff(self, request: WordingDiffRequest) -> WordingDiffOutcome:
+		"""Surface material differences across insurer offer wordings (WT-G10). Degrades cleanly."""
+		model_id = request.model_id or DEFAULT_MODEL_ID
+		prompt = build_wording_diff_prompt(request)
+
+		try:
+			llm_response = self._invoke(tenant_id=request.tenant_id, model_id=model_id, prompt=prompt)
+		except AllProvidersUnavailable as e:
+			emit(
+				"warn", "assist.wording_diff.degraded",
+				fields={"tenant_id": request.tenant_id, "reason": str(e)[:200]},
+			)
+			return DraftDegraded(reason=str(e))
+
+		try:
+			fields = validate_wording_diff_response(llm_response.payload)
+		except SchemaViolationError as e:
+			emit(
+				"warn", "assist.wording_diff.schema_violation",
+				fields={"tenant_id": request.tenant_id, "error_count": len(e.errors)},
+			)
+			return DraftSchemaInvalid(errors=tuple(e.errors))
+
+		response = WordingDiffResponse(
+			differences=list(fields.differences),
+			flags=list(fields.flags),
+			language=request.language,
+			degraded=False,
+			model_version=llm_response.model_version,
+			prompt_tokens=llm_response.prompt_tokens,
+			completion_tokens=llm_response.completion_tokens,
+			latency_ms=llm_response.latency_ms,
+		)
+		emit(
+			"info", "assist.wording_diff.completed",
+			fields={
+				"tenant_id": request.tenant_id, "language": request.language,
+				"offers": len(request.offers), "differences": len(response.differences),
+				"model_version": response.model_version,
+			},
+		)
+		return WordingDiffSuccess(response=response)
+
 
 __all__ = (
 	"AssistService",
@@ -408,4 +463,6 @@ __all__ = (
 	"RecommendationSuccess",
 	"SuggestFieldsSuccess",
 	"SuggestOutcome",
+	"WordingDiffOutcome",
+	"WordingDiffSuccess",
 )
