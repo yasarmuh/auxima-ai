@@ -25,6 +25,8 @@ from auxima_ai.assist.schema import (
 	DraftNoteResponse,
 	RecommendationRequest,
 	RecommendationResponse,
+	SoVExtractRequest,
+	SoVExtractResponse,
 	SuggestFieldsRequest,
 	SuggestFieldsResponse,
 	WordingDiffRequest,
@@ -38,6 +40,7 @@ from auxima_ai.assist.service import (
 	DraftNoteSuccess,
 	DraftSchemaInvalid,
 	RecommendationSuccess,
+	SoVExtractSuccess,
 	SuggestFieldsSuccess,
 	WordingDiffSuccess,
 )
@@ -292,10 +295,47 @@ def summarise_dn(
 	raise AssertionError(f"unhandled dn-summary outcome: {type(outcome).__name__}")  # pragma: no cover
 
 
+@router.post(
+	"/extract-sov",
+	response_model=SoVExtractResponse,
+	summary="Structure Schedule-of-Values text → line items (WT-G11)",
+	responses={
+		200: {"description": "Structured SoV line items"},
+		502: {"description": "Upstream model replied but not in the required shape"},
+		503: {"description": "All AI models unavailable"},
+	},
+)
+def extract_sov(
+	body: SoVExtractRequest,
+	service: AssistService = Depends(get_assist_service),
+):
+	"""Structure SoV text into line items; degrade cleanly if no model is available."""
+	outcome = service.extract_sov(body)
+
+	if isinstance(outcome, SoVExtractSuccess):
+		return JSONResponse(status_code=200, content=outcome.response.model_dump())
+
+	if isinstance(outcome, DraftDegraded):
+		return JSONResponse(
+			status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+			content={"detail": "AI is temporarily unavailable.", "degraded": True, "reason": outcome.reason},
+			headers={"Retry-After": "30"},
+		)
+
+	if isinstance(outcome, DraftSchemaInvalid):
+		return JSONResponse(
+			status_code=status.HTTP_502_BAD_GATEWAY,
+			content={"detail": "the AI model returned an unexpected format.", "errors": list(outcome.errors)},
+		)
+
+	raise AssertionError(f"unhandled sov-extract outcome: {type(outcome).__name__}")  # pragma: no cover
+
+
 __all__ = (
 	"draft_email",
 	"draft_note",
 	"draft_recommendation",
+	"extract_sov",
 	"get_assist_service",
 	"reset_assist_service",
 	"router",

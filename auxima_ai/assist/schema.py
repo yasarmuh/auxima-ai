@@ -327,6 +327,51 @@ class DNSummaryResponse(BaseModel):
 	latency_ms: int = 0
 
 
+# --- SoV line-item extraction (WT-G11, step-04) -------------------------------------------
+
+
+class SoVExtractRequest(BaseModel):
+	"""Body of ``POST /v1/assist/extract-sov`` — extracted SoV text in, structured items out."""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	tenant_id: str = Field(..., min_length=1, max_length=128)
+	text: str = Field(..., min_length=1, max_length=32000, description="Extracted Schedule-of-Values text.")
+	language: str = Field("en", pattern="^(en|ar)$")
+	model_id: str | None = Field(None, max_length=128)
+
+
+class SoVLineItem(BaseModel):
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	description: str = Field(..., min_length=1, max_length=500)
+	value: float | None = Field(None, ge=0)
+	category: str | None = Field(None, max_length=80)
+
+
+class SoVExtractFields(BaseModel):
+	"""LLM shape — the structured line items (+ optional total)."""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	line_items: list[SoVLineItem] = Field(..., min_length=1, max_length=300)
+	total_value: float | None = Field(None, ge=0)
+
+
+class SoVExtractResponse(BaseModel):
+	model_config = ConfigDict(extra="forbid")
+
+	line_items: list[SoVLineItem]
+	total_value: float | None = None
+	count: int = 0
+	language: str = "en"
+	degraded: bool = False
+	model_version: str = ""
+	prompt_tokens: int = 0
+	completion_tokens: int = 0
+	latency_ms: int = 0
+
+
 __all__ = (
 	"DNSummaryFields",
 	"DNSummaryRequest",
@@ -344,6 +389,10 @@ __all__ = (
 	"RecommendationRequest",
 	"RecommendationResponse",
 	"StyleExample",
+	"SoVExtractFields",
+	"SoVExtractRequest",
+	"SoVExtractResponse",
+	"SoVLineItem",
 	"SuggestFieldsRequest",
 	"SuggestFieldsResponse",
 	"WordingDiffFields",

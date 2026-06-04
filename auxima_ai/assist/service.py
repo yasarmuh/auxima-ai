@@ -21,12 +21,14 @@ from auxima_ai.assist.prompts import (
 	build_draft_note_prompt,
 	build_dn_summary_prompt,
 	build_recommendation_prompt,
+	build_sov_extract_prompt,
 	build_suggest_fields_prompt,
 	build_wording_diff_prompt,
 	validate_dn_summary_response,
 	validate_draft_email_response,
 	validate_draft_note_response,
 	validate_recommendation_response,
+	validate_sov_extract_response,
 	validate_suggest_fields_response,
 	validate_wording_diff_response,
 )
@@ -38,6 +40,8 @@ from auxima_ai.assist.schema import (
 	DraftNoteRequest,
 	DraftNoteResponse,
 	LegalCheck,
+	SoVExtractRequest,
+	SoVExtractResponse,
 	RecommendationFields,
 	RecommendationRequest,
 	RecommendationResponse,
@@ -135,6 +139,14 @@ class DNSummarySuccess:
 
 
 DNSummaryOutcome = DNSummarySuccess | DraftDegraded | DraftSchemaInvalid
+
+
+@dataclass(frozen=True)
+class SoVExtractSuccess:
+	response: SoVExtractResponse
+
+
+SoVExtractOutcome = SoVExtractSuccess | DraftDegraded | DraftSchemaInvalid
 
 
 def _fmt_pct(p: float) -> str:
@@ -497,6 +509,40 @@ class AssistService:
 		)
 		return DNSummarySuccess(response=response)
 
+	def extract_sov(self, request: SoVExtractRequest) -> SoVExtractOutcome:
+		"""Structure SoV text into line items (WT-G11). Degrades cleanly."""
+		model_id = request.model_id or DEFAULT_MODEL_ID
+		prompt = build_sov_extract_prompt(request)
+
+		try:
+			llm_response = self._invoke(tenant_id=request.tenant_id, model_id=model_id, prompt=prompt)
+		except AllProvidersUnavailable as e:
+			emit("warn", "assist.extract_sov.degraded", fields={"tenant_id": request.tenant_id, "reason": str(e)[:200]})
+			return DraftDegraded(reason=str(e))
+
+		try:
+			fields = validate_sov_extract_response(llm_response.payload)
+		except SchemaViolationError as e:
+			emit("warn", "assist.extract_sov.schema_violation", fields={"tenant_id": request.tenant_id, "error_count": len(e.errors)})
+			return DraftSchemaInvalid(errors=tuple(e.errors))
+
+		response = SoVExtractResponse(
+			line_items=fields.line_items,
+			total_value=fields.total_value,
+			count=len(fields.line_items),
+			language=request.language,
+			degraded=False,
+			model_version=llm_response.model_version,
+			prompt_tokens=llm_response.prompt_tokens,
+			completion_tokens=llm_response.completion_tokens,
+			latency_ms=llm_response.latency_ms,
+		)
+		emit(
+			"info", "assist.extract_sov.completed",
+			fields={"tenant_id": request.tenant_id, "items": response.count, "model_version": response.model_version},
+		)
+		return SoVExtractSuccess(response=response)
+
 
 __all__ = (
 	"AssistService",
@@ -504,6 +550,8 @@ __all__ = (
 	"ProviderStep",
 	"DNSummaryOutcome",
 	"DNSummarySuccess",
+	"SoVExtractOutcome",
+	"SoVExtractSuccess",
 	"DraftDegraded",
 	"DraftEmailSuccess",
 	"DraftNoteSuccess",
