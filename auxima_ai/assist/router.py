@@ -21,6 +21,8 @@ from auxima_ai.assist.schema import (
 	DraftEmailResponse,
 	DraftNoteRequest,
 	DraftNoteResponse,
+	RecommendationRequest,
+	RecommendationResponse,
 	SuggestFieldsRequest,
 	SuggestFieldsResponse,
 )
@@ -30,6 +32,7 @@ from auxima_ai.assist.service import (
 	DraftEmailSuccess,
 	DraftNoteSuccess,
 	DraftSchemaInvalid,
+	RecommendationSuccess,
 	SuggestFieldsSuccess,
 )
 
@@ -174,9 +177,47 @@ def suggest_fields(
 	raise AssertionError(f"unhandled suggest outcome: {type(outcome).__name__}")  # pragma: no cover
 
 
+@router.post(
+	"/draft-recommendation",
+	response_model=RecommendationResponse,
+	summary="Draft the Article 9(b) recommendation note (reasoning + citations + legal-line check)",
+	responses={
+		200: {"description": "Drafted note (body_md) + structured legal_check"},
+		502: {"description": "Upstream model replied but not in the required shape"},
+		503: {"description": "All AI models unavailable — write the note manually"},
+	},
+)
+def draft_recommendation(
+	body: RecommendationRequest,
+	service: AssistService = Depends(get_assist_service),
+):
+	"""Draft one recommendation note; degrade cleanly if no model is available."""
+	outcome = service.draft_recommendation(body)
+
+	if isinstance(outcome, RecommendationSuccess):
+		return JSONResponse(status_code=200, content=outcome.response.model_dump())
+
+	if isinstance(outcome, DraftDegraded):
+		return JSONResponse(
+			status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+			content={"detail": "AI is temporarily unavailable; please write the note manually.",
+			         "degraded": True, "reason": outcome.reason},
+			headers={"Retry-After": "30"},
+		)
+
+	if isinstance(outcome, DraftSchemaInvalid):
+		return JSONResponse(
+			status_code=status.HTTP_502_BAD_GATEWAY,
+			content={"detail": "the AI model returned an unexpected format.", "errors": list(outcome.errors)},
+		)
+
+	raise AssertionError(f"unhandled recommendation outcome: {type(outcome).__name__}")  # pragma: no cover
+
+
 __all__ = (
 	"draft_email",
 	"draft_note",
+	"draft_recommendation",
 	"get_assist_service",
 	"reset_assist_service",
 	"router",

@@ -19,9 +19,11 @@ from auxima_ai.assist.prompts import (
 	SchemaViolationError,
 	build_draft_email_prompt,
 	build_draft_note_prompt,
+	build_recommendation_prompt,
 	build_suggest_fields_prompt,
 	validate_draft_email_response,
 	validate_draft_note_response,
+	validate_recommendation_response,
 	validate_suggest_fields_response,
 )
 from auxima_ai.assist.schema import (
@@ -29,6 +31,10 @@ from auxima_ai.assist.schema import (
 	DraftEmailResponse,
 	DraftNoteRequest,
 	DraftNoteResponse,
+	LegalCheck,
+	RecommendationFields,
+	RecommendationRequest,
+	RecommendationResponse,
 	SuggestFieldsRequest,
 	SuggestFieldsResponse,
 )
@@ -97,6 +103,59 @@ class SuggestFieldsSuccess:
 
 
 SuggestOutcome = SuggestFieldsSuccess | DraftDegraded | DraftSchemaInvalid
+
+
+@dataclass(frozen=True)
+class RecommendationSuccess:
+	response: RecommendationResponse
+
+
+RecommendationOutcome = RecommendationSuccess | DraftDegraded | DraftSchemaInvalid
+
+
+def _fmt_pct(p: float) -> str:
+	"""Trim trailing zeros: 12.5 -> '12.5', 15.0 -> '15'."""
+	return f"{p:.4f}".rstrip("0").rstrip(".")
+
+
+# Mandatory legal block, appended deterministically (never LLM-generated). Both languages keep the
+# literal "9(b)" article token so the legal-line check is language-agnostic.
+_LEGAL_BLOCK = {
+	"en": (
+		"\n\n---\n*Commission disclosed: {pct}% (within the Appendix A cap). This recommendation is "
+		"prepared under Insurance Authority Implementing Regulations Article 9(b); the comparison "
+		"artefact and supporting records are retained for {years} years per Article 24.*"
+	),
+	"ar": (
+		"\n\n---\n*الإفصاح عن العمولة: {pct}% (ضمن حد الملحق أ). أُعدّت هذه التوصية وفقًا للمادة 9(b) "
+		"من اللائحة التنفيذية لهيئة التأمين؛ ويُحتفظ بوثيقة المقارنة والسجلات الداعمة لمدة {years} "
+		"سنوات وفقًا للمادة 24.*"
+	),
+}
+_WHY_HEADER = {"en": "**Why {insurer}:**", "ar": "**لماذا {insurer}:**"}
+
+
+def _assemble_recommendation_body(req: RecommendationRequest, fields: RecommendationFields) -> str:
+	"""LLM reasoning + citation bullets + the deterministic legal block."""
+	header = _WHY_HEADER.get(req.language, _WHY_HEADER["en"]).format(insurer=req.recommended_insurer)
+	bullets = "\n".join(f"- {c}" for c in fields.citations)
+	legal = _LEGAL_BLOCK.get(req.language, _LEGAL_BLOCK["en"]).format(
+		pct=_fmt_pct(req.commission_pct), years=req.retention_years
+	)
+	return f"{fields.reasoning}\n\n{header}\n{bullets}{legal}"
+
+
+def _legal_check(req: RecommendationRequest, body_md: str) -> LegalCheck:
+	"""Verify the assembled note names the insurer, discloses the commission %, and cites Art 9(b)."""
+	insurer_named = req.recommended_insurer in body_md
+	commission_disclosed = f"{_fmt_pct(req.commission_pct)}%" in body_md
+	art9b_present = "9(b)" in body_md
+	return LegalCheck(
+		insurer_named=insurer_named,
+		commission_disclosed=commission_disclosed,
+		art9b_present=art9b_present,
+		passed=insurer_named and commission_disclosed and art9b_present,
+	)
 
 
 @dataclass
@@ -284,6 +343,56 @@ class AssistService:
 		)
 		return SuggestFieldsSuccess(response=response)
 
+	def draft_recommendation(self, request: RecommendationRequest) -> RecommendationOutcome:
+		"""Draft the Article 9(b) recommendation: LLM writes the reasoning, the service appends
+		the mandatory legal block deterministically, then runs the legal-line check. Degrades
+		cleanly (broker writes the note manually) if no model is available."""
+		model_id = request.model_id or DEFAULT_MODEL_ID
+		prompt = build_recommendation_prompt(request)
+
+		try:
+			llm_response = self._invoke(tenant_id=request.tenant_id, model_id=model_id, prompt=prompt)
+		except AllProvidersUnavailable as e:
+			emit(
+				"warn", "assist.draft_recommendation.degraded",
+				fields={"tenant_id": request.tenant_id, "reason": str(e)[:200]},
+			)
+			return DraftDegraded(reason=str(e))
+
+		try:
+			fields = validate_recommendation_response(llm_response.payload)
+		except SchemaViolationError as e:
+			emit(
+				"warn", "assist.draft_recommendation.schema_violation",
+				fields={"tenant_id": request.tenant_id, "error_count": len(e.errors)},
+			)
+			return DraftSchemaInvalid(errors=tuple(e.errors))
+
+		body_md = _assemble_recommendation_body(request, fields)
+		legal = _legal_check(request, body_md)
+		response = RecommendationResponse(
+			recommended_insurer=request.recommended_insurer,
+			body_md=body_md,
+			citations=list(fields.citations),
+			legal_check=legal,
+			language=request.language,
+			degraded=False,
+			model_version=llm_response.model_version,
+			prompt_tokens=llm_response.prompt_tokens,
+			completion_tokens=llm_response.completion_tokens,
+			latency_ms=llm_response.latency_ms,
+		)
+		emit(
+			"info", "assist.draft_recommendation.completed",
+			fields={
+				"tenant_id": request.tenant_id, "language": request.language,
+				"recommended_insurer": request.recommended_insurer,
+				"legal_passed": legal.passed, "model_version": response.model_version,
+				"tokens": response.prompt_tokens + response.completion_tokens,
+			},
+		)
+		return RecommendationSuccess(response=response)
+
 
 __all__ = (
 	"AssistService",
@@ -295,6 +404,8 @@ __all__ = (
 	"DraftOutcome",
 	"DraftSchemaInvalid",
 	"NoteOutcome",
+	"RecommendationOutcome",
+	"RecommendationSuccess",
 	"SuggestFieldsSuccess",
 	"SuggestOutcome",
 )
