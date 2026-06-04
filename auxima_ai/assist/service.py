@@ -212,8 +212,17 @@ class AssistService:
 	enforcer: PolicyEnforcer | None = None
 	steps: list[ProviderStep] | None = None
 
-	def _invoke(self, *, tenant_id: str, model_id: str, prompt: str) -> LLMResponse:
+	def _invoke(
+		self, *, tenant_id: str, model_id: str, prompt: str, local_only: bool = False,
+	) -> LLMResponse:
 		"""Call the LLM, enforcing per-tenant provider-class policy when wired.
+
+		``local_only=True`` is a data-minimisation-by-design pin (GDPR Art 25 / PDPL): the prompt
+		carries unstructured sensitive text — a D&N call transcript can contain HEALTH information
+		(special-category data), a SoV insured names/addresses — that the regex redactor cannot
+		sanitise (no NER). Such prompts are NEVER egressed to a cloud provider, even for a
+		``cloud_egress_approved`` tenant: every non-self-hosted step is skipped. If no self-hosted
+		model is available the chain raises and the call degrades cleanly (broker records manually).
 
 		Raises :class:`AllProvidersUnavailable` if every allowed step fails or
 		all steps are policy-skipped — each public method already maps that to
@@ -222,6 +231,13 @@ class AssistService:
 		if self.enforcer is not None and self.steps is not None:
 			errors: list[tuple[str, str]] = []
 			for step in self.steps:
+				if local_only and step.provider_class != "self-hosted":
+					logger.info(
+						"assist: data-minimisation pin — sensitive free-text NOT egressed to "
+						"cloud step %s (provider_class %s, tenant %s); self-hosted only",
+						step.model_id, step.provider_class, tenant_id,
+					)
+					continue
 				if not self.enforcer.provider_class_allowed(tenant_id, step.provider_class):
 					logger.info(
 						"assist: tenant %s tier forbids provider_class %s — skipping step %s",
@@ -478,7 +494,10 @@ class AssistService:
 		prompt = build_dn_summary_prompt(request)
 
 		try:
-			llm_response = self._invoke(tenant_id=request.tenant_id, model_id=model_id, prompt=prompt)
+			# local_only: a D&N transcript can carry HEALTH data (special-category) — never to cloud.
+			llm_response = self._invoke(
+				tenant_id=request.tenant_id, model_id=model_id, prompt=prompt, local_only=True,
+			)
 		except AllProvidersUnavailable as e:
 			emit("warn", "assist.summarise_dn.degraded", fields={"tenant_id": request.tenant_id, "reason": str(e)[:200]})
 			return DraftDegraded(reason=str(e))
@@ -515,7 +534,11 @@ class AssistService:
 		prompt = build_sov_extract_prompt(request)
 
 		try:
-			llm_response = self._invoke(tenant_id=request.tenant_id, model_id=model_id, prompt=prompt)
+			# local_only: a SoV can carry insured names/addresses (personal data the regex
+			# redactor can't strip) — keep the raw schedule in-Kingdom, never to cloud.
+			llm_response = self._invoke(
+				tenant_id=request.tenant_id, model_id=model_id, prompt=prompt, local_only=True,
+			)
 		except AllProvidersUnavailable as e:
 			emit("warn", "assist.extract_sov.degraded", fields={"tenant_id": request.tenant_id, "reason": str(e)[:200]})
 			return DraftDegraded(reason=str(e))
