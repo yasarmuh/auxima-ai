@@ -17,6 +17,8 @@ from fastapi import APIRouter, Depends, status
 from fastapi.responses import JSONResponse
 
 from auxima_ai.assist.schema import (
+	DNSummaryRequest,
+	DNSummaryResponse,
 	DraftEmailRequest,
 	DraftEmailResponse,
 	DraftNoteRequest,
@@ -30,6 +32,7 @@ from auxima_ai.assist.schema import (
 )
 from auxima_ai.assist.service import (
 	AssistService,
+	DNSummarySuccess,
 	DraftDegraded,
 	DraftEmailSuccess,
 	DraftNoteSuccess,
@@ -253,6 +256,42 @@ def wording_diff(
 	raise AssertionError(f"unhandled wording-diff outcome: {type(outcome).__name__}")  # pragma: no cover
 
 
+@router.post(
+	"/summarise-dn",
+	response_model=DNSummaryResponse,
+	summary="Summarise a D&N call → structured needs + coverage gaps (WT-G13)",
+	responses={
+		200: {"description": "Demands & needs + coverage gaps"},
+		502: {"description": "Upstream model replied but not in the required shape"},
+		503: {"description": "All AI models unavailable"},
+	},
+)
+def summarise_dn(
+	body: DNSummaryRequest,
+	service: AssistService = Depends(get_assist_service),
+):
+	"""Summarise a demands & needs call; degrade cleanly if no model is available."""
+	outcome = service.summarise_dn(body)
+
+	if isinstance(outcome, DNSummarySuccess):
+		return JSONResponse(status_code=200, content=outcome.response.model_dump())
+
+	if isinstance(outcome, DraftDegraded):
+		return JSONResponse(
+			status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+			content={"detail": "AI is temporarily unavailable.", "degraded": True, "reason": outcome.reason},
+			headers={"Retry-After": "30"},
+		)
+
+	if isinstance(outcome, DraftSchemaInvalid):
+		return JSONResponse(
+			status_code=status.HTTP_502_BAD_GATEWAY,
+			content={"detail": "the AI model returned an unexpected format.", "errors": list(outcome.errors)},
+		)
+
+	raise AssertionError(f"unhandled dn-summary outcome: {type(outcome).__name__}")  # pragma: no cover
+
+
 __all__ = (
 	"draft_email",
 	"draft_note",
@@ -262,5 +301,6 @@ __all__ = (
 	"router",
 	"set_assist_service",
 	"suggest_fields",
+	"summarise_dn",
 	"wording_diff",
 )

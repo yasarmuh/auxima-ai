@@ -290,7 +290,47 @@ class WordingDiffResponse(BaseModel):
 	latency_ms: int = 0
 
 
+# --- D&N call-summariser (WT-G13, step-03) ------------------------------------------------
+
+
+class DNSummaryRequest(BaseModel):
+	"""Body of ``POST /v1/assist/summarise-dn``."""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	tenant_id: str = Field(..., min_length=1, max_length=128)
+	transcript: str = Field(..., min_length=1, max_length=16000, description="Call transcript / broker notes.")
+	current_cover: str | None = Field(None, max_length=8000, description="Summary of existing cover (for gap detection).")
+	language: str = Field("en", pattern="^(en|ar)$")
+	model_id: str | None = Field(None, max_length=128)
+
+
+class DNSummaryFields(BaseModel):
+	"""LLM shape — the demands & needs + detected coverage gaps."""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	needs: list[str] = Field(..., min_length=1, max_length=20)
+	coverage_gaps: list[str] = Field(default_factory=list, max_length=10)
+
+
+class DNSummaryResponse(BaseModel):
+	model_config = ConfigDict(extra="forbid")
+
+	needs: list[str]
+	coverage_gaps: list[str]
+	language: str
+	degraded: bool = False
+	model_version: str = ""
+	prompt_tokens: int = 0
+	completion_tokens: int = 0
+	latency_ms: int = 0
+
+
 __all__ = (
+	"DNSummaryFields",
+	"DNSummaryRequest",
+	"DNSummaryResponse",
 	"DraftEmailFields",
 	"DraftEmailRequest",
 	"DraftEmailResponse",

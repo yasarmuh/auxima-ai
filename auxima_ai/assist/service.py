@@ -19,9 +19,11 @@ from auxima_ai.assist.prompts import (
 	SchemaViolationError,
 	build_draft_email_prompt,
 	build_draft_note_prompt,
+	build_dn_summary_prompt,
 	build_recommendation_prompt,
 	build_suggest_fields_prompt,
 	build_wording_diff_prompt,
+	validate_dn_summary_response,
 	validate_draft_email_response,
 	validate_draft_note_response,
 	validate_recommendation_response,
@@ -29,6 +31,8 @@ from auxima_ai.assist.prompts import (
 	validate_wording_diff_response,
 )
 from auxima_ai.assist.schema import (
+	DNSummaryRequest,
+	DNSummaryResponse,
 	DraftEmailRequest,
 	DraftEmailResponse,
 	DraftNoteRequest,
@@ -123,6 +127,14 @@ class WordingDiffSuccess:
 
 
 WordingDiffOutcome = WordingDiffSuccess | DraftDegraded | DraftSchemaInvalid
+
+
+@dataclass(frozen=True)
+class DNSummarySuccess:
+	response: DNSummaryResponse
+
+
+DNSummaryOutcome = DNSummarySuccess | DraftDegraded | DraftSchemaInvalid
 
 
 def _fmt_pct(p: float) -> str:
@@ -448,11 +460,50 @@ class AssistService:
 		)
 		return WordingDiffSuccess(response=response)
 
+	def summarise_dn(self, request: DNSummaryRequest) -> DNSummaryOutcome:
+		"""Summarise a D&N call into structured needs + coverage gaps (WT-G13). Degrades cleanly."""
+		model_id = request.model_id or DEFAULT_MODEL_ID
+		prompt = build_dn_summary_prompt(request)
+
+		try:
+			llm_response = self._invoke(tenant_id=request.tenant_id, model_id=model_id, prompt=prompt)
+		except AllProvidersUnavailable as e:
+			emit("warn", "assist.summarise_dn.degraded", fields={"tenant_id": request.tenant_id, "reason": str(e)[:200]})
+			return DraftDegraded(reason=str(e))
+
+		try:
+			fields = validate_dn_summary_response(llm_response.payload)
+		except SchemaViolationError as e:
+			emit("warn", "assist.summarise_dn.schema_violation", fields={"tenant_id": request.tenant_id, "error_count": len(e.errors)})
+			return DraftSchemaInvalid(errors=tuple(e.errors))
+
+		response = DNSummaryResponse(
+			needs=list(fields.needs),
+			coverage_gaps=list(fields.coverage_gaps),
+			language=request.language,
+			degraded=False,
+			model_version=llm_response.model_version,
+			prompt_tokens=llm_response.prompt_tokens,
+			completion_tokens=llm_response.completion_tokens,
+			latency_ms=llm_response.latency_ms,
+		)
+		emit(
+			"info", "assist.summarise_dn.completed",
+			fields={
+				"tenant_id": request.tenant_id, "language": request.language,
+				"needs": len(response.needs), "gaps": len(response.coverage_gaps),
+				"model_version": response.model_version,
+			},
+		)
+		return DNSummarySuccess(response=response)
+
 
 __all__ = (
 	"AssistService",
 	"DEFAULT_MODEL_ID",
 	"ProviderStep",
+	"DNSummaryOutcome",
+	"DNSummarySuccess",
 	"DraftDegraded",
 	"DraftEmailSuccess",
 	"DraftNoteSuccess",
