@@ -23,8 +23,14 @@ from auxima_ai.assist.schema import (
 	DraftEmailResponse,
 	DraftNoteRequest,
 	DraftNoteResponse,
+	IntentClassifyRequest,
+	IntentClassifyResponse,
+	PolicyIngestRequest,
+	PolicyIngestResponse,
 	RecommendationRequest,
 	RecommendationResponse,
+	RenewalDraftRequest,
+	RenewalDraftResponse,
 	SoVExtractRequest,
 	SoVExtractResponse,
 	SuggestFieldsRequest,
@@ -39,7 +45,10 @@ from auxima_ai.assist.service import (
 	DraftEmailSuccess,
 	DraftNoteSuccess,
 	DraftSchemaInvalid,
+	IntentClassifySuccess,
+	PolicyIngestSuccess,
 	RecommendationSuccess,
+	RenewalDraftSuccess,
 	SoVExtractSuccess,
 	SuggestFieldsSuccess,
 	WordingDiffSuccess,
@@ -331,12 +340,123 @@ def extract_sov(
 	raise AssertionError(f"unhandled sov-extract outcome: {type(outcome).__name__}")  # pragma: no cover
 
 
+@router.post(
+	"/classify-intent",
+	response_model=IntentClassifyResponse,
+	summary="Classify an inbound insurer reply → quote/counter/decline/rfi/other (WT-G08)",
+	responses={
+		200: {"description": "Classified intent + confidence + rationale"},
+		502: {"description": "Upstream model replied but not in the required shape"},
+		503: {"description": "All AI models unavailable"},
+	},
+)
+def classify_intent(
+	body: IntentClassifyRequest,
+	service: AssistService = Depends(get_assist_service),
+):
+	"""Classify one inbound insurer message; degrade cleanly if no model is available."""
+	outcome = service.classify_intent(body)
+
+	if isinstance(outcome, IntentClassifySuccess):
+		return JSONResponse(status_code=200, content=outcome.response.model_dump())
+
+	if isinstance(outcome, DraftDegraded):
+		return JSONResponse(
+			status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+			content={"detail": "AI is temporarily unavailable.", "degraded": True, "reason": outcome.reason},
+			headers={"Retry-After": "30"},
+		)
+
+	if isinstance(outcome, DraftSchemaInvalid):
+		return JSONResponse(
+			status_code=status.HTTP_502_BAD_GATEWAY,
+			content={"detail": "the AI model returned an unexpected format.", "errors": list(outcome.errors)},
+		)
+
+	raise AssertionError(f"unhandled classify-intent outcome: {type(outcome).__name__}")  # pragma: no cover
+
+
+@router.post(
+	"/ingest-policy",
+	response_model=PolicyIngestResponse,
+	summary="Extract policy fields from an issued schedule + diff vs bound terms (WT-G15)",
+	responses={
+		200: {"description": "Extracted policy fields + discrepancies"},
+		502: {"description": "Upstream model replied but not in the required shape"},
+		503: {"description": "All AI models unavailable"},
+	},
+)
+def ingest_policy(
+	body: PolicyIngestRequest,
+	service: AssistService = Depends(get_assist_service),
+):
+	"""Ingest an issued policy document; degrade cleanly if no model is available."""
+	outcome = service.ingest_policy(body)
+
+	if isinstance(outcome, PolicyIngestSuccess):
+		return JSONResponse(status_code=200, content=outcome.response.model_dump())
+
+	if isinstance(outcome, DraftDegraded):
+		return JSONResponse(
+			status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+			content={"detail": "AI is temporarily unavailable.", "degraded": True, "reason": outcome.reason},
+			headers={"Retry-After": "30"},
+		)
+
+	if isinstance(outcome, DraftSchemaInvalid):
+		return JSONResponse(
+			status_code=status.HTTP_502_BAD_GATEWAY,
+			content={"detail": "the AI model returned an unexpected format.", "errors": list(outcome.errors)},
+		)
+
+	raise AssertionError(f"unhandled ingest-policy outcome: {type(outcome).__name__}")  # pragma: no cover
+
+
+@router.post(
+	"/draft-renewal",
+	response_model=RenewalDraftResponse,
+	summary="Pre-draft a renewal RFQ + broker brief from the expiring policy (WT-G20)",
+	responses={
+		200: {"description": "Renewal RFQ draft + considerations"},
+		502: {"description": "Upstream model replied but not in the required shape"},
+		503: {"description": "All AI models unavailable"},
+	},
+)
+def draft_renewal(
+	body: RenewalDraftRequest,
+	service: AssistService = Depends(get_assist_service),
+):
+	"""Pre-draft a renewal RFQ; degrade cleanly if no model is available."""
+	outcome = service.draft_renewal(body)
+
+	if isinstance(outcome, RenewalDraftSuccess):
+		return JSONResponse(status_code=200, content=outcome.response.model_dump())
+
+	if isinstance(outcome, DraftDegraded):
+		return JSONResponse(
+			status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+			content={"detail": "AI is temporarily unavailable.", "degraded": True, "reason": outcome.reason},
+			headers={"Retry-After": "30"},
+		)
+
+	if isinstance(outcome, DraftSchemaInvalid):
+		return JSONResponse(
+			status_code=status.HTTP_502_BAD_GATEWAY,
+			content={"detail": "the AI model returned an unexpected format.", "errors": list(outcome.errors)},
+		)
+
+	raise AssertionError(f"unhandled draft-renewal outcome: {type(outcome).__name__}")  # pragma: no cover
+
+
 __all__ = (
+	"classify_intent",
 	"draft_email",
 	"draft_note",
 	"draft_recommendation",
+	"draft_renewal",
 	"extract_sov",
 	"get_assist_service",
+	"ingest_policy",
 	"reset_assist_service",
 	"router",
 	"set_assist_service",

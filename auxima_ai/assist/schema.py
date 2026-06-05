@@ -7,6 +7,8 @@ back in here). The response is the drafted subject + body.
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
@@ -372,10 +374,155 @@ class SoVExtractResponse(BaseModel):
 	latency_ms: int = 0
 
 
+# --- Inbound insurer-response intent classifier (WT-G08, step-07) -------------------------
+
+
+class IntentClassifyRequest(BaseModel):
+	"""Body of ``POST /v1/assist/classify-intent`` — one inbound insurer reply to classify."""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	tenant_id: str = Field(..., min_length=1, max_length=128)
+	message: str = Field(..., min_length=1, max_length=16000, description="Inbound insurer reply text.")
+	language: str = Field("en", pattern="^(en|ar)$")
+	model_id: str | None = Field(None, max_length=128)
+
+
+class IntentClassifyFields(BaseModel):
+	"""LLM shape — the classified intent + confidence + a one-line rationale."""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	intent: Literal["quote", "counter", "decline", "rfi", "other"]
+	confidence: float = Field(..., ge=0.0, le=1.0)
+	rationale: str = Field(..., min_length=1, max_length=500)
+
+
+class IntentClassifyResponse(BaseModel):
+	model_config = ConfigDict(extra="forbid")
+
+	intent: str
+	confidence: float
+	rationale: str
+	language: str
+	degraded: bool = False
+	model_version: str = ""
+	prompt_tokens: int = 0
+	completion_tokens: int = 0
+	latency_ms: int = 0
+
+
+# --- AI policy-ingest (WT-G15, step-14) ---------------------------------------------------
+
+
+class PolicyIngestRequest(BaseModel):
+	"""Body of ``POST /v1/assist/ingest-policy`` — insurer schedule/wording text in, fields out.
+
+	``bound_terms`` (optional) is a small key→value map of the bound quote's terms (e.g.
+	``{"sum_insured": "80000000", "premium": "1148000", "insurer": "Gulf Union"}``) used to
+	detect discrepancies between what was bound and what the issued policy actually says.
+	"""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	tenant_id: str = Field(..., min_length=1, max_length=128)
+	document_text: str = Field(..., min_length=1, max_length=48000, description="Extracted insurer policy schedule/wording text.")
+	bound_terms: dict[str, str] | None = Field(None, description="Key terms of the bound quote, for discrepancy detection.")
+	language: str = Field("en", pattern="^(en|ar)$")
+	model_id: str | None = Field(None, max_length=128)
+
+
+class IngestedPolicyFields(BaseModel):
+	"""Structured fields extracted from the policy document. Money is float for TRANSPORT only —
+	the Frappe side converts to Decimal/Currency on write (CLAUDE §1: money is Decimal in storage)."""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	insurer: str | None = Field(None, max_length=200)
+	policy_number: str | None = Field(None, max_length=120)
+	sum_insured: float | None = Field(None, ge=0)
+	premium: float | None = Field(None, ge=0)
+	deductible: float | None = Field(None, ge=0)
+	period_from: str | None = Field(None, max_length=40)
+	period_to: str | None = Field(None, max_length=40)
+	coverage_summary: str | None = Field(None, max_length=2000)
+
+
+class PolicyIngestFields(BaseModel):
+	"""LLM shape — extracted policy fields + discrepancies vs the bound quote."""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	fields: IngestedPolicyFields
+	discrepancies: list[str] = Field(default_factory=list, max_length=20)
+
+
+class PolicyIngestResponse(BaseModel):
+	model_config = ConfigDict(extra="forbid")
+
+	fields: IngestedPolicyFields
+	discrepancies: list[str]
+	language: str
+	degraded: bool = False
+	model_version: str = ""
+	prompt_tokens: int = 0
+	completion_tokens: int = 0
+	latency_ms: int = 0
+
+
+# --- Renewal pre-drafter (WT-G20, step-16) ------------------------------------------------
+
+
+class RenewalDraftRequest(BaseModel):
+	"""Body of ``POST /v1/assist/draft-renewal`` — expiring policy (+ loss history) → renewal RFQ draft."""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	tenant_id: str = Field(..., min_length=1, max_length=128)
+	policy_summary: str = Field(..., min_length=1, max_length=8000, description="Expiring policy details to renew.")
+	loss_experience: str | None = Field(None, max_length=8000, description="Claims/loss history summary for the period.")
+	language: str = Field("en", pattern="^(en|ar)$")
+	model_id: str | None = Field(None, max_length=128)
+
+
+class RenewalDraftFields(BaseModel):
+	"""LLM shape — the pre-drafted renewal RFQ + a broker brief of considerations."""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	rfq_subject: str = Field(..., min_length=1, max_length=300)
+	rfq_body: str = Field(..., min_length=1, max_length=8000)
+	considerations: list[str] = Field(default_factory=list, max_length=15)
+
+
+class RenewalDraftResponse(BaseModel):
+	model_config = ConfigDict(extra="forbid")
+
+	rfq_subject: str
+	rfq_body: str
+	considerations: list[str]
+	language: str
+	degraded: bool = False
+	model_version: str = ""
+	prompt_tokens: int = 0
+	completion_tokens: int = 0
+	latency_ms: int = 0
+
+
 __all__ = (
 	"DNSummaryFields",
 	"DNSummaryRequest",
 	"DNSummaryResponse",
+	"IngestedPolicyFields",
+	"IntentClassifyFields",
+	"IntentClassifyRequest",
+	"IntentClassifyResponse",
+	"PolicyIngestFields",
+	"PolicyIngestRequest",
+	"PolicyIngestResponse",
+	"RenewalDraftFields",
+	"RenewalDraftRequest",
+	"RenewalDraftResponse",
 	"DraftEmailFields",
 	"DraftEmailRequest",
 	"DraftEmailResponse",

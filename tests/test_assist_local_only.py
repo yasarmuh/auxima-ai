@@ -19,6 +19,9 @@ from typing import Any
 
 from auxima_ai.assist.schema import (
 	DNSummaryRequest,
+	IntentClassifyRequest,
+	PolicyIngestRequest,
+	RenewalDraftRequest,
 	SoVExtractRequest,
 	WordingDiffRequest,
 	WordingOffer,
@@ -125,3 +128,39 @@ def test_wording_diff_stays_cloud_eligible():
 	out = svc.wording_diff(req)
 	assert isinstance(out, WordingDiffSuccess)
 	assert len(cloud.prompts) == 1                  # fell through to cloud — allowed for wording
+
+
+# --- WT-G08/G15/G20: all carry client-referencing free-text → pinned self-hosted-only ---------
+
+_INTENT_PAYLOAD = {"intent": "quote", "confidence": 0.9, "rationale": "quote attached"}
+_POLICY_PAYLOAD = {"fields": {"insurer": "X"}, "discrepancies": []}
+_RENEWAL_PAYLOAD = {"rfq_subject": "Renewal", "rfq_body": "please quote", "considerations": []}
+
+
+def test_classify_intent_never_egresses_to_cloud():
+	local = SpyCaller(_INTENT_PAYLOAD, fail=True)
+	cloud = SpyCaller(_INTENT_PAYLOAD)
+	svc = AssistService(enforcer=_cloud_tenant(), steps=_steps(local, cloud))
+	out = svc.classify_intent(IntentClassifyRequest(tenant_id="cloudy", message="please find our quote, premium 1.1m"))
+	assert isinstance(out, DraftDegraded)
+	assert cloud.prompts == []
+
+
+def test_ingest_policy_never_egresses_to_cloud():
+	local = SpyCaller(_POLICY_PAYLOAD, fail=True)
+	cloud = SpyCaller(_POLICY_PAYLOAD)
+	svc = AssistService(enforcer=_cloud_tenant(), steps=_steps(local, cloud))
+	out = svc.ingest_policy(PolicyIngestRequest(tenant_id="cloudy", document_text="Insured: Mr X, Riyadh; SI 80m"))
+	assert isinstance(out, DraftDegraded)
+	assert cloud.prompts == []
+
+
+def test_draft_renewal_never_egresses_to_cloud():
+	local = SpyCaller(_RENEWAL_PAYLOAD, fail=True)
+	cloud = SpyCaller(_RENEWAL_PAYLOAD)
+	svc = AssistService(enforcer=_cloud_tenant(), steps=_steps(local, cloud))
+	out = svc.draft_renewal(RenewalDraftRequest(
+		tenant_id="cloudy", policy_summary="Motor fleet", loss_experience="injury claim, physiotherapy",
+	))
+	assert isinstance(out, DraftDegraded)
+	assert cloud.prompts == []

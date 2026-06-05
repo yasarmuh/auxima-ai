@@ -20,14 +20,20 @@ from auxima_ai.assist.prompts import (
 	build_draft_email_prompt,
 	build_draft_note_prompt,
 	build_dn_summary_prompt,
+	build_intent_classify_prompt,
+	build_policy_ingest_prompt,
 	build_recommendation_prompt,
+	build_renewal_draft_prompt,
 	build_sov_extract_prompt,
 	build_suggest_fields_prompt,
 	build_wording_diff_prompt,
 	validate_dn_summary_response,
 	validate_draft_email_response,
 	validate_draft_note_response,
+	validate_intent_classify_response,
+	validate_policy_ingest_response,
 	validate_recommendation_response,
+	validate_renewal_draft_response,
 	validate_sov_extract_response,
 	validate_suggest_fields_response,
 	validate_wording_diff_response,
@@ -39,7 +45,13 @@ from auxima_ai.assist.schema import (
 	DraftEmailResponse,
 	DraftNoteRequest,
 	DraftNoteResponse,
+	IntentClassifyRequest,
+	IntentClassifyResponse,
 	LegalCheck,
+	PolicyIngestRequest,
+	PolicyIngestResponse,
+	RenewalDraftRequest,
+	RenewalDraftResponse,
 	SoVExtractRequest,
 	SoVExtractResponse,
 	RecommendationFields,
@@ -147,6 +159,30 @@ class SoVExtractSuccess:
 
 
 SoVExtractOutcome = SoVExtractSuccess | DraftDegraded | DraftSchemaInvalid
+
+
+@dataclass(frozen=True)
+class IntentClassifySuccess:
+	response: IntentClassifyResponse
+
+
+IntentClassifyOutcome = IntentClassifySuccess | DraftDegraded | DraftSchemaInvalid
+
+
+@dataclass(frozen=True)
+class PolicyIngestSuccess:
+	response: PolicyIngestResponse
+
+
+PolicyIngestOutcome = PolicyIngestSuccess | DraftDegraded | DraftSchemaInvalid
+
+
+@dataclass(frozen=True)
+class RenewalDraftSuccess:
+	response: RenewalDraftResponse
+
+
+RenewalDraftOutcome = RenewalDraftSuccess | DraftDegraded | DraftSchemaInvalid
 
 
 def _fmt_pct(p: float) -> str:
@@ -566,6 +602,124 @@ class AssistService:
 		)
 		return SoVExtractSuccess(response=response)
 
+	def classify_intent(self, request: IntentClassifyRequest) -> IntentClassifyOutcome:
+		"""Classify an inbound insurer reply (quote/counter/decline/rfi/other) (WT-G08). Degrades cleanly."""
+		model_id = request.model_id or DEFAULT_MODEL_ID
+		prompt = build_intent_classify_prompt(request)
+
+		try:
+			# local_only: the insurer message can reference the insured (names/details) — keep in-Kingdom.
+			llm_response = self._invoke(
+				tenant_id=request.tenant_id, model_id=model_id, prompt=prompt, local_only=True,
+			)
+		except AllProvidersUnavailable as e:
+			emit("warn", "assist.classify_intent.degraded", fields={"tenant_id": request.tenant_id, "reason": str(e)[:200]})
+			return DraftDegraded(reason=str(e))
+
+		try:
+			fields = validate_intent_classify_response(llm_response.payload)
+		except SchemaViolationError as e:
+			emit("warn", "assist.classify_intent.schema_violation", fields={"tenant_id": request.tenant_id, "error_count": len(e.errors)})
+			return DraftSchemaInvalid(errors=tuple(e.errors))
+
+		response = IntentClassifyResponse(
+			intent=fields.intent,
+			confidence=fields.confidence,
+			rationale=fields.rationale,
+			language=request.language,
+			degraded=False,
+			model_version=llm_response.model_version,
+			prompt_tokens=llm_response.prompt_tokens,
+			completion_tokens=llm_response.completion_tokens,
+			latency_ms=llm_response.latency_ms,
+		)
+		emit(
+			"info", "assist.classify_intent.completed",
+			fields={"tenant_id": request.tenant_id, "intent": response.intent, "model_version": response.model_version},
+		)
+		return IntentClassifySuccess(response=response)
+
+	def ingest_policy(self, request: PolicyIngestRequest) -> PolicyIngestOutcome:
+		"""Extract policy fields from an issued schedule/wording + diff vs bound terms (WT-G15). Degrades cleanly."""
+		model_id = request.model_id or DEFAULT_MODEL_ID
+		prompt = build_policy_ingest_prompt(request)
+
+		try:
+			# local_only: a policy schedule carries insured names/addresses (and health for medical
+			# lines) the regex redactor can't strip — never egress the document to cloud.
+			llm_response = self._invoke(
+				tenant_id=request.tenant_id, model_id=model_id, prompt=prompt, local_only=True,
+			)
+		except AllProvidersUnavailable as e:
+			emit("warn", "assist.ingest_policy.degraded", fields={"tenant_id": request.tenant_id, "reason": str(e)[:200]})
+			return DraftDegraded(reason=str(e))
+
+		try:
+			fields = validate_policy_ingest_response(llm_response.payload)
+		except SchemaViolationError as e:
+			emit("warn", "assist.ingest_policy.schema_violation", fields={"tenant_id": request.tenant_id, "error_count": len(e.errors)})
+			return DraftSchemaInvalid(errors=tuple(e.errors))
+
+		response = PolicyIngestResponse(
+			fields=fields.fields,
+			discrepancies=list(fields.discrepancies),
+			language=request.language,
+			degraded=False,
+			model_version=llm_response.model_version,
+			prompt_tokens=llm_response.prompt_tokens,
+			completion_tokens=llm_response.completion_tokens,
+			latency_ms=llm_response.latency_ms,
+		)
+		emit(
+			"info", "assist.ingest_policy.completed",
+			fields={
+				"tenant_id": request.tenant_id, "discrepancies": len(response.discrepancies),
+				"model_version": response.model_version,
+			},
+		)
+		return PolicyIngestSuccess(response=response)
+
+	def draft_renewal(self, request: RenewalDraftRequest) -> RenewalDraftOutcome:
+		"""Pre-draft a renewal RFQ + broker brief from the expiring policy + loss experience (WT-G20). Degrades cleanly."""
+		model_id = request.model_id or DEFAULT_MODEL_ID
+		prompt = build_renewal_draft_prompt(request)
+
+		try:
+			# local_only: loss/claims experience can include health data + the policy summary carries
+			# insured details — keep the renewal context in-Kingdom.
+			llm_response = self._invoke(
+				tenant_id=request.tenant_id, model_id=model_id, prompt=prompt, local_only=True,
+			)
+		except AllProvidersUnavailable as e:
+			emit("warn", "assist.draft_renewal.degraded", fields={"tenant_id": request.tenant_id, "reason": str(e)[:200]})
+			return DraftDegraded(reason=str(e))
+
+		try:
+			fields = validate_renewal_draft_response(llm_response.payload)
+		except SchemaViolationError as e:
+			emit("warn", "assist.draft_renewal.schema_violation", fields={"tenant_id": request.tenant_id, "error_count": len(e.errors)})
+			return DraftSchemaInvalid(errors=tuple(e.errors))
+
+		response = RenewalDraftResponse(
+			rfq_subject=fields.rfq_subject,
+			rfq_body=fields.rfq_body,
+			considerations=list(fields.considerations),
+			language=request.language,
+			degraded=False,
+			model_version=llm_response.model_version,
+			prompt_tokens=llm_response.prompt_tokens,
+			completion_tokens=llm_response.completion_tokens,
+			latency_ms=llm_response.latency_ms,
+		)
+		emit(
+			"info", "assist.draft_renewal.completed",
+			fields={
+				"tenant_id": request.tenant_id, "considerations": len(response.considerations),
+				"model_version": response.model_version,
+			},
+		)
+		return RenewalDraftSuccess(response=response)
+
 
 __all__ = (
 	"AssistService",
@@ -573,6 +727,12 @@ __all__ = (
 	"ProviderStep",
 	"DNSummaryOutcome",
 	"DNSummarySuccess",
+	"IntentClassifyOutcome",
+	"IntentClassifySuccess",
+	"PolicyIngestOutcome",
+	"PolicyIngestSuccess",
+	"RenewalDraftOutcome",
+	"RenewalDraftSuccess",
 	"SoVExtractOutcome",
 	"SoVExtractSuccess",
 	"DraftDegraded",
