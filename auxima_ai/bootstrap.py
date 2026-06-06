@@ -135,6 +135,15 @@ def build_assist_service(
             ProviderStep(
                 caller=OpenRouterLLMCaller(),
                 model_id=settings.assist_openrouter_model,
+                # DELIBERATE pre-launch decision (ADR-GA3 / audit R9, 2026-06-06):
+                # the assist step uses an OpenRouter ``:free`` model, so it is
+                # classed ``free-cloud`` here — NOT a bug, despite enforcer.py
+                # classifying the *provider* ``openrouter`` as ``paid-cloud`` for
+                # the residency-contract (intake) path. This lets the free tier
+                # exercise assist at zero cost until launch.
+                # >>> LAUNCH ACTION: revisit — flip to ``paid-cloud`` (and move to
+                #     a paid model) so the assist class matches the enforcer/intake
+                #     classification once real spend begins. <<<
                 provider_class="free-cloud",
             )
         )
