@@ -16,6 +16,12 @@ dependencies = [
     # system binary (license-hygiene clean). Lazy-imported in pdf_text.py, so a
     # deployment without it fails loudly at call time, not at import.
     "pypdf>=4.0",
+    # P2-09 scanned-PDF OCR: pypdfium2 rasterises pages (Apache-2.0/BSD), pytesseract
+    # shells out to the Tesseract binary (Apache-2.0 wrapper; binary is Apache-2.0).
+    # Both lazy-imported in ocr_tesseract.py — a deployment without the Tesseract
+    # binary self-reports OCR unavailable (scanned PDFs → Failed), never crashes.
+    "pypdfium2>=4.0",
+    "pytesseract>=0.3.10",
 ]
 
 [project.optional-dependencies]
