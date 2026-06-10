@@ -10,12 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from auxima_ai.assist.schema import DraftEmailRequest
+from auxima_ai.assist.schema import DraftEmailRequest, WordingDiffRequest, WordingOffer
 from auxima_ai.assist.service import (
 	AssistService,
 	DraftDegraded,
 	DraftEmailSuccess,
 	ProviderStep,
+	WordingDiffSuccess,
 )
 from auxima_ai.intake.llm import LLMResponse
 from auxima_ai.policy.enforcer import PolicyEnforcer, TenantPolicy, TierPolicy
@@ -86,10 +87,11 @@ def test_unknown_tenant_fails_closed_to_local():
 
 
 def test_free_cloud_tenant_falls_through_to_cloud_when_ollama_down():
-	# region="INTL": cloud fallthrough is only lawful for a non-in-Kingdom
-	# tenant. A KSA tenant would be residency-blocked (test_residency_invariant).
+	# region="INTL": cloud fallthrough is only lawful for a non-in-Kingdom tenant. A KSA tenant
+	# would be residency-blocked (test_residency_invariant). Uses wording_diff — the one endpoint
+	# deliberately cloud-eligible; the personal-free-text endpoints are pinned self-hosted (H-1).
 	local = SpyCaller(fail=True)
-	cloud = SpyCaller(payload={"subject": "CLOUD", "body": "cloud body"})
+	cloud = SpyCaller(payload={"differences": ["flood cover differs"], "flags": []})
 	svc = AssistService(
 		enforcer=_enforcer("t2", TierPolicy.OLLAMA_THEN_FREE_CLOUD, region="INTL"),
 		steps=[
@@ -97,9 +99,11 @@ def test_free_cloud_tenant_falls_through_to_cloud_when_ollama_down():
 			ProviderStep(cloud, "cloud/gemma:free", "free-cloud"),
 		],
 	)
-	out = svc.draft_email(_req("t2"))
-	assert isinstance(out, DraftEmailSuccess)
-	assert out.response.subject == "CLOUD"
+	out = svc.wording_diff(WordingDiffRequest(
+		tenant_id="t2",
+		offers=[WordingOffer(insurer="A", wording="flood excluded"), WordingOffer(insurer="B", wording="flood included")],
+	))
+	assert isinstance(out, WordingDiffSuccess)
 	assert local.calls == ["ollama/llama3.1:8b"]  # tried first
 	assert cloud.calls == ["cloud/gemma:free"]     # tier permits the fallback
 

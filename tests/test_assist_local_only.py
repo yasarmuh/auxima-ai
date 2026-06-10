@@ -19,10 +19,16 @@ from typing import Any
 
 from auxima_ai.assist.schema import (
 	DNSummaryRequest,
+	DraftEmailRequest,
+	DraftNoteRequest,
+	FieldSpec,
 	IntentClassifyRequest,
 	PolicyIngestRequest,
+	RecommendationCandidate,
+	RecommendationRequest,
 	RenewalDraftRequest,
 	SoVExtractRequest,
+	SuggestFieldsRequest,
 	WordingDiffRequest,
 	WordingOffer,
 )
@@ -161,6 +167,63 @@ def test_draft_renewal_never_egresses_to_cloud():
 	svc = AssistService(enforcer=_cloud_tenant(), steps=_steps(local, cloud))
 	out = svc.draft_renewal(RenewalDraftRequest(
 		tenant_id="cloudy", policy_summary="Motor fleet", loss_experience="injury claim, physiotherapy",
+	))
+	assert isinstance(out, DraftDegraded)
+	assert cloud.prompts == []
+
+
+# --- H-1 (audit 2026-06-10): the four assist endpoints that carry personal/health free-text ---
+# (recipient names + past-email bodies; untrusted record/error context; filled field PII; client
+# demands & needs) are now pinned self-hosted-only, matching the five above. Local DOWN + a
+# cloud-approved tenant must DEGRADE, never fall through to cloud.
+
+_EMPTY_PAYLOAD: dict[str, Any] = {}
+
+
+def test_draft_email_never_egresses_to_cloud():
+	local = SpyCaller(_EMPTY_PAYLOAD, fail=True)
+	cloud = SpyCaller(_EMPTY_PAYLOAD)
+	svc = AssistService(enforcer=_cloud_tenant(), steps=_steps(local, cloud))
+	out = svc.draft_email(DraftEmailRequest(
+		tenant_id="cloudy", purpose="follow up about the renewal", recipient_name="Mr X",
+		company_name="Acme Co",
+	))
+	assert isinstance(out, DraftDegraded)
+	assert cloud.prompts == []
+
+
+def test_draft_note_never_egresses_to_cloud():
+	local = SpyCaller(_EMPTY_PAYLOAD, fail=True)
+	cloud = SpyCaller(_EMPTY_PAYLOAD)
+	svc = AssistService(enforcer=_cloud_tenant(), steps=_steps(local, cloud))
+	out = svc.draft_note(DraftNoteRequest(
+		tenant_id="cloudy", instruction="summarise the call",
+		context={"patient_note": "diabetic, needs chronic cover"},
+	))
+	assert isinstance(out, DraftDegraded)
+	assert cloud.prompts == []
+
+
+def test_suggest_fields_never_egresses_to_cloud():
+	local = SpyCaller(_EMPTY_PAYLOAD, fail=True)
+	cloud = SpyCaller(_EMPTY_PAYLOAD)
+	svc = AssistService(enforcer=_cloud_tenant(), steps=_steps(local, cloud))
+	out = svc.suggest_fields(SuggestFieldsRequest(
+		tenant_id="cloudy", doctype="Customer", fields=[FieldSpec(fieldname="industry")],
+		current_values={"contact_name": "Mr X", "national_id": "1234567890"},
+	))
+	assert isinstance(out, DraftDegraded)
+	assert cloud.prompts == []
+
+
+def test_draft_recommendation_never_egresses_to_cloud():
+	local = SpyCaller(_EMPTY_PAYLOAD, fail=True)
+	cloud = SpyCaller(_EMPTY_PAYLOAD)
+	svc = AssistService(enforcer=_cloud_tenant(), steps=_steps(local, cloud))
+	out = svc.draft_recommendation(RecommendationRequest(
+		tenant_id="cloudy", recommended_insurer="A",
+		candidates=[RecommendationCandidate(insurer="A", premium=1000.0)],
+		client_needs=["chronic-condition cover"], commission_pct=10.0,
 	))
 	assert isinstance(out, DraftDegraded)
 	assert cloud.prompts == []

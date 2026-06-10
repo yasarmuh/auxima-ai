@@ -308,7 +308,12 @@ class AssistService:
 		prompt = build_draft_email_prompt(request)
 
 		try:
-			llm_response = self._invoke(tenant_id=request.tenant_id, model_id=model_id, prompt=prompt)
+			# local_only: the recipient/company names + the `examples` past-sent email bodies can
+			# carry personal data (and health narrative for medical-lines brokers) the regex
+			# redactor can't strip — never egress to cloud (audit 2026-06-10 H-1).
+			llm_response = self._invoke(
+				tenant_id=request.tenant_id, model_id=model_id, prompt=prompt, local_only=True,
+			)
 		except AllProvidersUnavailable as e:
 			emit(
 				"warn", "assist.draft_email.degraded",
@@ -353,7 +358,11 @@ class AssistService:
 		prompt = build_draft_note_prompt(request)
 
 		try:
-			llm_response = self._invoke(tenant_id=request.tenant_id, model_id=model_id, prompt=prompt)
+			# local_only: `context` is untrusted record/error data that can carry PII the regex
+			# redactor can't strip — never egress to cloud (audit 2026-06-10 H-1).
+			llm_response = self._invoke(
+				tenant_id=request.tenant_id, model_id=model_id, prompt=prompt, local_only=True,
+			)
 		except AllProvidersUnavailable as e:
 			emit(
 				"warn", "assist.draft_note.degraded",
@@ -396,7 +405,11 @@ class AssistService:
 		allowed = {f.fieldname for f in request.fields}
 
 		try:
-			llm_response = self._invoke(tenant_id=request.tenant_id, model_id=model_id, prompt=prompt)
+			# local_only: `current_values` are already-filled field values (PII) the regex redactor
+			# can't strip — never egress to cloud (audit 2026-06-10 H-1).
+			llm_response = self._invoke(
+				tenant_id=request.tenant_id, model_id=model_id, prompt=prompt, local_only=True,
+			)
 		except AllProvidersUnavailable as e:
 			emit(
 				"warn", "assist.suggest_fields.degraded",
@@ -439,7 +452,11 @@ class AssistService:
 		prompt = build_recommendation_prompt(request)
 
 		try:
-			llm_response = self._invoke(tenant_id=request.tenant_id, model_id=model_id, prompt=prompt)
+			# local_only: `client_needs` (demands & needs signals) can carry health/personal data the
+			# regex redactor can't strip — never egress to cloud (audit 2026-06-10 H-1).
+			llm_response = self._invoke(
+				tenant_id=request.tenant_id, model_id=model_id, prompt=prompt, local_only=True,
+			)
 		except AllProvidersUnavailable as e:
 			emit(
 				"warn", "assist.draft_recommendation.degraded",
