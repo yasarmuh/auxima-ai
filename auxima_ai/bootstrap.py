@@ -152,7 +152,10 @@ def build_assist_service(
         # No API key (or bad config) — skip the opt-in cloud step; Ollama-only.
         logger.warning("bootstrap: OpenRouter assist step skipped (%s); Ollama-only", e)
     logger.info("bootstrap: assist chain wired Ollama-first with %d provider step(s)", len(steps))
-    return AssistService(enforcer=enforcer, steps=steps)
+    # H-2: every served assist call emits an AI-Run-Log row via the same emitter as intake.
+    return AssistService(
+        enforcer=enforcer, steps=steps, activity_emitter=_build_activity_emitter(settings),
+    )
 
 
 def bootstrap_app(settings: Settings | None = None) -> IntakeService:

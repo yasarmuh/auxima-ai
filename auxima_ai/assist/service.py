@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
+from auxima_ai.activity.row import RetentionClass, build_activity_row
 from auxima_ai.assist.fallback import AllProvidersUnavailable
 from auxima_ai.assist.prompts import (
 	SchemaViolationError,
@@ -63,9 +65,11 @@ from auxima_ai.assist.schema import (
 	WordingDiffResponse,
 )
 from auxima_ai.intake.llm import LLMCaller, LLMResponse, StubLLMCaller
+from auxima_ai.intake.service import ActivityEmitter, NullActivityEmitter
 from auxima_ai.observability.log import emit
 from auxima_ai.observability.redact import redact
 from auxima_ai.policy.enforcer import PolicyEnforcer
+from auxima_ai.ratelimit.bucket import Denied
 
 logger = logging.getLogger(__name__)
 
@@ -247,9 +251,11 @@ class AssistService:
 	llm: LLMCaller = field(default_factory=StubLLMCaller)
 	enforcer: PolicyEnforcer | None = None
 	steps: list[ProviderStep] | None = None
+	activity_emitter: ActivityEmitter = field(default_factory=lambda: NullActivityEmitter())
 
 	def _invoke(
 		self, *, tenant_id: str, model_id: str, prompt: str, local_only: bool = False,
+		now: datetime | None = None,
 	) -> LLMResponse:
 		"""Call the LLM, enforcing per-tenant provider-class policy when wired.
 
@@ -265,6 +271,13 @@ class AssistService:
 		a clean ``DraftDegraded``.
 		"""
 		if self.enforcer is not None and self.steps is not None:
+			now = now or datetime.now(timezone.utc)
+			# H-2: rate-limit EVERY assist call (incl. all-local) so an approved tenant can't spam
+			# cloud, and an Ollama-only tenant can't DoS the local GPU. One token per call.
+			rate = self.enforcer.rate_limiter.try_consume(tenant_id)
+			if isinstance(rate, Denied):
+				logger.info("assist: tenant %s rate-limited (retry_after=%ss)", tenant_id, rate.retry_after_seconds)
+				raise AllProvidersUnavailable([("rate_limit", f"rate limited; retry_after={rate.retry_after_seconds}s")])
 			errors: list[tuple[str, str]] = []
 			for step in self.steps:
 				if local_only and step.provider_class != "self-hosted":
@@ -278,6 +291,15 @@ class AssistService:
 					logger.info(
 						"assist: tenant %s tier forbids provider_class %s — skipping step %s",
 						tenant_id, step.provider_class, step.model_id,
+					)
+					continue
+				# H-2: cost-ceiling pre-check for CLOUD steps only (self-hosted/Ollama is free, so it
+				# never debits and is always allowed). Once the tenant's period spend is at/over the
+				# ceiling, skip the cloud step — local serves if available, else degrade.
+				if step.provider_class != "self-hosted" and self._cloud_over_ceiling(tenant_id, now):
+					logger.info(
+						"assist: tenant %s at/over monthly ceiling — skipping cloud step %s",
+						tenant_id, step.model_id,
 					)
 					continue
 				# R3 — data minimisation before cloud egress (GDPR/PDPL): local
@@ -295,13 +317,48 @@ class AssistService:
 							step.model_id, tenant_id,
 						)
 				try:
-					return step.caller.call(model_id=step.model_id, prompt=step_prompt)
+					response = step.caller.call(model_id=step.model_id, prompt=step_prompt)
 				except Exception as e:  # noqa: BLE001 - any failure advances the chain
 					errors.append((step.model_id, f"{type(e).__name__}: {e}"))
 					logger.warning("assist provider %s failed, trying next: %s", step.model_id, e)
 					continue
+				# H-2: AI Run Log — every served assist call emits ONE canonical activity row
+				# (CRM §4). Cost is omitted: assist models are unpriced and the cloud one is :free.
+				self._emit_run_log(tenant_id, step, response, now)
+				return response
 			raise AllProvidersUnavailable(errors)
 		return self.llm.call(model_id=model_id, prompt=prompt)
+
+	def _cloud_over_ceiling(self, tenant_id: str, now: datetime) -> bool:
+		"""True when the tenant's period spend has reached its monthly ceiling (cloud gate).
+
+		Model-independent: reads the ledger period total vs the policy ceiling. An unknown tenant
+		has no policy/ceiling → not over (a cloud step is then refused by residency/tier anyway).
+		"""
+		try:
+			policy = self.enforcer.policy_for(tenant_id)
+		except Exception:  # noqa: BLE001 - unknown tenant -> no ceiling to enforce here
+			return False
+		return self.enforcer.ledger.period_total(tenant_id, now) >= policy.monthly_ceiling
+
+	def _emit_run_log(self, tenant_id: str, step: ProviderStep, response: LLMResponse, now: datetime) -> None:
+		"""Emit one Auxima Activity row for a served assist call (AI Run Log; CRM §4)."""
+		row = build_activity_row(
+			tenant_id=tenant_id,
+			kind="assist.completed",
+			payload={
+				"model": step.model_id,
+				"provider_class": step.provider_class,
+				"model_version": response.model_version,
+				"prompt_tokens": response.prompt_tokens,
+				"completion_tokens": response.completion_tokens,
+				"latency_ms": response.latency_ms,
+			},
+			retention=RetentionClass.OPERATIONAL,
+			source="sidecar.assist",
+			ts=now,
+		)
+		self.activity_emitter.emit(row)
 
 	def draft_email(self, request: DraftEmailRequest) -> DraftOutcome:
 		model_id = request.model_id or DEFAULT_MODEL_ID
