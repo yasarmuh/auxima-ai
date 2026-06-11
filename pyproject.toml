@@ -22,6 +22,10 @@ dependencies = [
     # binary self-reports OCR unavailable (scanned PDFs → Failed), never crashes.
     "pypdfium2>=4.0",
     "pytesseract>=0.3.10",
+    # P3-01 ClaimsCrew: LangGraph state machine (CLAUDE.md §2 — LangGraph for stateful
+    # flows). MIT; pulls langchain-core (MIT). The graph is in-process only (no
+    # checkpointer/persistence in v1), no network egress of its own.
+    "langgraph>=1.0",
 ]
 
 [project.optional-dependencies]

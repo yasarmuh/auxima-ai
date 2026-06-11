@@ -30,6 +30,8 @@ from auxima_ai.activity.http_emitter import HTTPActivityEmitter
 from auxima_ai.assist.openrouter import OpenRouterError, OpenRouterLLMCaller
 from auxima_ai.assist.router import set_assist_service
 from auxima_ai.assist.service import AssistService, ProviderStep
+from auxima_ai.claims.router import set_claims_service
+from auxima_ai.claims.service import ClaimsCrewService
 from auxima_ai.config import Settings, get_settings
 from auxima_ai.intake.ocr_tesseract import TesseractOcrEngine
 from auxima_ai.intake.ollama import OllamaLLMCaller
@@ -182,7 +184,11 @@ def bootstrap_app(settings: Settings | None = None) -> IntakeService:
         )
     )
     # Share the intake enforcer so a tenant's tier/policy applies to BOTH paths.
-    set_assist_service(build_assist_service(s, enforcer=service.enforcer))
+    assist = build_assist_service(s, enforcer=service.enforcer)
+    set_assist_service(assist)
+    # ClaimsCrew (P3-01): reuses the assist invoke chain — tier gate, rate limit, ceiling,
+    # redaction and AI-Run-Log all apply; the crew adds the LangGraph FNOL state machine on top.
+    set_claims_service(ClaimsCrewService(invoke=assist._invoke))
     return service
 
 

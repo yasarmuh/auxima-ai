@@ -37,7 +37,6 @@ from auxima_ai.assist.service import (
 	DNSummarySuccess,
 	DraftDegraded,
 	ProviderStep,
-	SoVExtractSuccess,
 	WordingDiffSuccess,
 )
 from auxima_ai.intake.llm import LLMResponse
