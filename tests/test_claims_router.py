@@ -45,7 +45,9 @@ def test_process_returns_recommendations():
 		assert data["status"] == "ok"
 		assert data["subcrew"] == "property"
 		assert data["reserve"]["suggested_reserve"] == "82500.00"  # 75000 x 1.1
-		assert data["audit_trail"] == ["validate_fnol", "triage", "reserve_suggest", "route_line"]
+		assert data["audit_trail"] == [
+			"validate_fnol", "triage", "reserve_suggest", "route_line", "subcrew_actions",
+		]
 	finally:
 		reset_claims_service()
 

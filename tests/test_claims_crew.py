@@ -63,7 +63,9 @@ def test_happy_path_walks_all_stages_in_order():
 	svc = ClaimsCrewService(invoke=invoke)
 	out = svc.process(_fnol())
 	assert out.status == "ok"
-	assert out.audit_trail == ["validate_fnol", "triage", "reserve_suggest", "route_line"]
+	assert out.audit_trail == [
+		"validate_fnol", "triage", "reserve_suggest", "route_line", "subcrew_actions",
+	]
 	assert out.triage is not None and out.triage.severity == "medium"
 	assert out.degraded is False
 

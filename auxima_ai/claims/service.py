@@ -12,9 +12,12 @@ Graph (CLAUDE.md §2: LangGraph for stateful flows):
     reserve_suggest    (pure Decimal engine — reproducible financial control, no LLM)
           │
           ▼
-      route_line       (loss_type → P3-04 sub-crew label; skeleton until P3-04 lands)
+      route_line       (loss_type → P3-04 sub-crew label)
           │
           ▼
+   subcrew_actions     (P3-04: the routed line's sub-crew — deterministic advisory next-actions,
+          │             no LLM: loss-adjuster dispatch / RI early-warning / subrogation / legal
+          ▼             referral / specialist survey / connector-pending notes)
          END
 
 The LLM step is invoked through an injected callable with the SAME signature as
@@ -38,8 +41,10 @@ from auxima_ai.claims.schema import (
 	ClaimsProcessOutcome,
 	FNOLRequest,
 	ReserveSuggestionOut,
+	SubCrewRecommendation,
 	TriageAssessment,
 )
+from auxima_ai.claims.subcrew import run_subcrew
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +81,7 @@ class ClaimsState(TypedDict, total=False):
 	triage: TriageAssessment
 	reserve: ReserveSuggestionOut
 	subcrew: str
+	subcrew_actions: list[SubCrewRecommendation]
 	degraded: bool
 
 
@@ -146,6 +152,14 @@ class ClaimsCrewService:
 		state["subcrew"] = _SUBCREW_BY_LINE[state["request"].loss_type]
 		return state
 
+	def _subcrew_actions(self, state: ClaimsState) -> ClaimsState:
+		"""Run the routed line's sub-crew (P3-04) — deterministic advisory next-actions, no LLM."""
+		state["audit_trail"].append("subcrew_actions")
+		state["subcrew_actions"] = run_subcrew(
+			state["subcrew"], state["request"], state["triage"], state.get("reserve"),
+		)
+		return state
+
 	# --- graph ----------------------------------------------------------------------------
 
 	def _build_graph(self) -> Any:
@@ -154,6 +168,7 @@ class ClaimsCrewService:
 		g.add_node("triage", self._triage)
 		g.add_node("reserve_suggest", self._reserve_suggest)
 		g.add_node("route_line", self._route_line)
+		g.add_node("subcrew_actions", self._subcrew_actions)
 		g.set_entry_point("validate_fnol")
 		g.add_conditional_edges(
 			"validate_fnol",
@@ -162,7 +177,8 @@ class ClaimsCrewService:
 		)
 		g.add_edge("triage", "reserve_suggest")
 		g.add_edge("reserve_suggest", "route_line")
-		g.add_edge("route_line", END)
+		g.add_edge("route_line", "subcrew_actions")
+		g.add_edge("subcrew_actions", END)
 		return g.compile()
 
 	# --- public ----------------------------------------------------------------------------
@@ -181,6 +197,7 @@ class ClaimsCrewService:
 			triage=final.get("triage"),
 			reserve=final.get("reserve"),
 			subcrew=final.get("subcrew"),
+			subcrew_actions=final.get("subcrew_actions", []),
 			health_data=request.loss_type == "medical",
 			degraded=bool(final.get("degraded")),
 		)

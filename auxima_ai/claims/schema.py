@@ -60,6 +60,19 @@ class ReserveSuggestionOut(BaseModel):
 	basis: str
 
 
+class SubCrewRecommendation(BaseModel):
+	"""One advisory next-action from a line-specific sub-crew (P3-04). Deterministic, no LLM.
+
+	``action`` is a stable machine code (the Desk maps it to a localized label); ``priority`` orders
+	the broker's worklist; ``rationale`` explains the trigger. Advisory only — the broker acts, the
+	crew never dispatches anything itself.
+	"""
+
+	action: str
+	priority: Literal["high", "medium", "low"]
+	rationale: str
+
+
 class ClaimsProcessOutcome(BaseModel):
 	"""The crew's verdict. status=rejected means FNOL validation failed CLOSED (no LLM ran)."""
 
@@ -69,6 +82,7 @@ class ClaimsProcessOutcome(BaseModel):
 	triage: TriageAssessment | None = None
 	reserve: ReserveSuggestionOut | None = None
 	subcrew: str | None = None
+	subcrew_actions: list[SubCrewRecommendation] = Field(default_factory=list)
 	health_data: bool = False
 	degraded: bool = False
 	reason: str | None = None
