@@ -187,7 +187,10 @@ def _normalise_response(raw: dict[str, Any], *, model_id: str) -> LLMResponse:
 		raise OpenRouterMalformedResponseError("OpenRouter choices[0].message.content empty")
 
 	try:
-		payload = json.loads(_strip_fence(content))
+		# strict=False tolerates literal control chars (unescaped newlines/tabs) inside string
+		# values — smaller instruct models routinely emit these in multi-line bodies, and a strict
+		# parse would 500 on otherwise-usable output.
+		payload = json.loads(_strip_fence(content), strict=False)
 	except json.JSONDecodeError as e:
 		raise OpenRouterMalformedResponseError(
 			f"OpenRouter message content was not valid JSON: {e}"
