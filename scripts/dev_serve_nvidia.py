@@ -19,7 +19,7 @@ import os
 import uvicorn
 
 from auxima_ai.assist.nvidia_dev import NvidiaDevLLMCaller
-from auxima_ai.assist.router import set_assist_service
+from auxima_ai.assist.router import get_assist_service
 from auxima_ai.assist.service import AssistService
 from auxima_ai.intake.llm import LLMResponse
 from auxima_ai.main import app
@@ -43,7 +43,12 @@ class _ForceModelCaller:
 def main() -> None:
 	model = os.environ.get("NVIDIA_DEV_MODEL", DEFAULT_MODEL)
 	# Constructs NvidiaDevLLMCaller -> raises unless AUXIMA_DEV_LLM_ENABLED=1 + key present.
-	set_assist_service(AssistService(llm=_ForceModelCaller(model)))
+	nvidia_svc = AssistService(llm=_ForceModelCaller(model))
+	# Override at the FastAPI dependency layer, NOT via set_assist_service: the app's startup
+	# lifespan runs bootstrap_app() which itself calls set_assist_service(...) and would clobber a
+	# pre-set singleton. dependency_overrides intercepts get_assist_service before it is consulted,
+	# so it wins regardless of startup order.
+	app.dependency_overrides[get_assist_service] = lambda: nvidia_svc
 	print("=" * 78)
 	print(f"  DEV SIDECAR — assist routed to NVIDIA model: {model}")
 	print("  ⚠️  SYNTHETIC DATA ONLY. This is NOT the production Ollama-first chain.")
