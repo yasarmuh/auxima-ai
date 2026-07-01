@@ -21,6 +21,7 @@ from auxima_ai.assist.schema import (
 	DNSummaryRequest,
 	DraftEmailRequest,
 	DraftNoteRequest,
+	DraftReplyRequest,
 	FieldSpec,
 	IntentClassifyRequest,
 	PolicyIngestRequest,
@@ -210,6 +211,20 @@ def test_suggest_fields_never_egresses_to_cloud():
 	out = svc.suggest_fields(SuggestFieldsRequest(
 		tenant_id="cloudy", doctype="Customer", fields=[FieldSpec(fieldname="industry")],
 		current_values={"contact_name": "Mr X", "national_id": "1234567890"},
+	))
+	assert isinstance(out, DraftDegraded)
+	assert cloud.prompts == []
+
+
+def test_draft_reply_never_egresses_to_cloud():
+	"""M6 omnichannel agent-bot: a WhatsApp thread can carry health/personal narrative, so the reply
+	drafter is pinned self-hosted-only. Local DOWN + a cloud-approved tenant must DEGRADE, not send
+	the customer's message to a cloud provider."""
+	local = SpyCaller(_EMPTY_PAYLOAD, fail=True)
+	cloud = SpyCaller(_EMPTY_PAYLOAD)
+	svc = AssistService(enforcer=_cloud_tenant(), steps=_steps(local, cloud))
+	out = svc.draft_reply(DraftReplyRequest(
+		tenant_id="cloudy", inbound_message="my son has asthma, is his medication covered?",
 	))
 	assert isinstance(out, DraftDegraded)
 	assert cloud.prompts == []

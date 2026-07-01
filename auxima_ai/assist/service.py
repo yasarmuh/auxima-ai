@@ -21,6 +21,7 @@ from auxima_ai.assist.prompts import (
 	SchemaViolationError,
 	build_draft_email_prompt,
 	build_draft_note_prompt,
+	build_draft_reply_prompt,
 	build_dn_summary_prompt,
 	build_intent_classify_prompt,
 	build_policy_ingest_prompt,
@@ -32,6 +33,7 @@ from auxima_ai.assist.prompts import (
 	validate_dn_summary_response,
 	validate_draft_email_response,
 	validate_draft_note_response,
+	validate_draft_reply_response,
 	validate_intent_classify_response,
 	validate_policy_ingest_response,
 	validate_recommendation_response,
@@ -47,6 +49,8 @@ from auxima_ai.assist.schema import (
 	DraftEmailResponse,
 	DraftNoteRequest,
 	DraftNoteResponse,
+	DraftReplyRequest,
+	DraftReplyResponse,
 	IntentClassifyRequest,
 	IntentClassifyResponse,
 	LegalCheck,
@@ -123,6 +127,14 @@ class DraftNoteSuccess:
 
 
 NoteOutcome = DraftNoteSuccess | DraftDegraded | DraftSchemaInvalid
+
+
+@dataclass(frozen=True)
+class DraftReplySuccess:
+	response: DraftReplyResponse
+
+
+DraftReplyOutcome = DraftReplySuccess | DraftDegraded | DraftSchemaInvalid
 
 
 @dataclass(frozen=True)
@@ -454,6 +466,59 @@ class AssistService:
 			},
 		)
 		return DraftNoteSuccess(response=response)
+
+	def draft_reply(self, request: DraftReplyRequest) -> DraftReplyOutcome:
+		"""Draft one advisory WhatsApp reply for the broker to review; degrade cleanly.
+
+		Advisory-only: the broker sends it (ADR-OD-OMNI). The thread is UNCONDITIONALLY pinned
+		``local_only=True`` — a WhatsApp conversation can carry HEALTH narrative (medical lines) or
+		personal data the regex redactor cannot strip (no NER), so it never egresses to a cloud
+		provider even for a ``cloud_egress_approved`` tenant. If no self-hosted model is available the
+		call degrades and the broker composes manually. (See [[llm-egress-no-ner-local-only]].)
+		"""
+		model_id = request.model_id or DEFAULT_MODEL_ID
+		prompt = build_draft_reply_prompt(request)
+
+		try:
+			llm_response = self._invoke(
+				tenant_id=request.tenant_id, model_id=model_id, prompt=prompt, local_only=True,
+			)
+		except AllProvidersUnavailable as e:
+			emit(
+				"warn", "assist.draft_reply.degraded",
+				fields={"tenant_id": request.tenant_id, "reason": str(e)[:200]},
+			)
+			return DraftDegraded(reason=str(e))
+
+		try:
+			fields = validate_draft_reply_response(llm_response.payload)
+		except SchemaViolationError as e:
+			emit(
+				"warn", "assist.draft_reply.schema_violation",
+				fields={"tenant_id": request.tenant_id, "error_count": len(e.errors)},
+			)
+			return DraftSchemaInvalid(errors=tuple(e.errors))
+
+		response = DraftReplyResponse(
+			reply=fields.reply,
+			language=request.language,
+			degraded=False,
+			model_version=llm_response.model_version,
+			prompt_tokens=llm_response.prompt_tokens,
+			completion_tokens=llm_response.completion_tokens,
+			latency_ms=llm_response.latency_ms,
+		)
+		emit(
+			"info", "assist.draft_reply.completed",
+			fields={
+				"tenant_id": request.tenant_id,
+				"language": request.language,
+				"model_version": response.model_version,
+				"history_turns": len(request.history),
+				"tokens": response.prompt_tokens + response.completion_tokens,
+			},
+		)
+		return DraftReplySuccess(response=response)
 
 	def suggest_fields(self, request: SuggestFieldsRequest) -> SuggestOutcome:
 		"""Suggest values for empty fields; degrade cleanly. Suggestion-only."""

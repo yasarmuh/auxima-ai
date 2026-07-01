@@ -509,7 +509,77 @@ class RenewalDraftResponse(BaseModel):
 	latency_ms: int = 0
 
 
+# --- Omnichannel agent-bot reply drafter (ADR-OD-OMNI M6, WhatsApp inbox) ------------------
+
+
+class ConversationTurn(BaseModel):
+	"""One prior message in the WhatsApp thread — grounding context for the reply.
+
+	``direction`` is from the broker's point of view: ``in`` = from the customer,
+	``out`` = a message the broker/tenant already sent. Both are UNTRUSTED free text.
+	"""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	direction: Literal["in", "out"]
+	text: str = Field(..., min_length=1, max_length=4000)
+
+
+class DraftReplyRequest(BaseModel):
+	"""Body of ``POST /v1/assist/draft-reply``.
+
+	Drafts ONE advisory reply to the latest inbound customer message. The broker
+	reviews and sends it — the bot NEVER auto-sends (advisory-only, per ADR-OD-OMNI
+	and the CoverageQA-risk rule: no auto-sent coverage assertions). A WhatsApp thread
+	can carry HEALTH narrative (medical lines) or personal data the regex redactor
+	cannot strip, so the service pins this path ``local_only=True`` unconditionally.
+	"""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	tenant_id: str = Field(..., min_length=1, max_length=128)
+	inbound_message: str = Field(
+		..., min_length=1, max_length=8000,
+		description="The latest inbound customer message to reply to.",
+	)
+	history: list[ConversationTurn] = Field(
+		default_factory=list, max_length=20,
+		description="Recent prior turns, oldest first, for context.",
+	)
+	instruction: str | None = Field(
+		None, max_length=2000,
+		description="Optional broker steer for the reply (e.g. 'ask for the vehicle registration').",
+	)
+	customer_name: str | None = Field(None, max_length=300)
+	language: str = Field("en", pattern="^(en|ar)$")
+	model_id: str | None = Field(None, max_length=128, description="Optional model override.")
+
+
+class DraftReplyFields(BaseModel):
+	"""The shape the LLM must return — the single reply body."""
+
+	model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+	reply: str = Field(..., min_length=1, max_length=8000)
+
+
+class DraftReplyResponse(BaseModel):
+	model_config = ConfigDict(extra="forbid")
+
+	reply: str
+	language: str
+	degraded: bool = False
+	model_version: str = ""
+	prompt_tokens: int = 0
+	completion_tokens: int = 0
+	latency_ms: int = 0
+
+
 __all__ = (
+	"ConversationTurn",
+	"DraftReplyFields",
+	"DraftReplyRequest",
+	"DraftReplyResponse",
 	"DNSummaryFields",
 	"DNSummaryRequest",
 	"DNSummaryResponse",

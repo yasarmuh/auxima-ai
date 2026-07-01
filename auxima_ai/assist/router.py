@@ -23,6 +23,8 @@ from auxima_ai.assist.schema import (
 	DraftEmailResponse,
 	DraftNoteRequest,
 	DraftNoteResponse,
+	DraftReplyRequest,
+	DraftReplyResponse,
 	IntentClassifyRequest,
 	IntentClassifyResponse,
 	PolicyIngestRequest,
@@ -44,6 +46,7 @@ from auxima_ai.assist.service import (
 	DraftDegraded,
 	DraftEmailSuccess,
 	DraftNoteSuccess,
+	DraftReplySuccess,
 	DraftSchemaInvalid,
 	IntentClassifySuccess,
 	PolicyIngestSuccess,
@@ -157,6 +160,43 @@ def draft_note(
 		)
 
 	raise AssertionError(f"unhandled note outcome: {type(outcome).__name__}")  # pragma: no cover
+
+
+@router.post(
+	"/draft-reply",
+	response_model=DraftReplyResponse,
+	summary="Draft one advisory WhatsApp reply for the broker to review (omnichannel, self-hosted only)",
+	responses={
+		200: {"description": "Drafted reply text"},
+		502: {"description": "Upstream model replied but not in the required shape"},
+		503: {"description": "All AI models unavailable — reply manually"},
+	},
+)
+def draft_reply(
+	body: DraftReplyRequest,
+	service: AssistService = Depends(get_assist_service),
+):
+	"""Draft one advisory customer reply; degrade cleanly. The broker sends it — never auto-sent."""
+	outcome = service.draft_reply(body)
+
+	if isinstance(outcome, DraftReplySuccess):
+		return JSONResponse(status_code=200, content=outcome.response.model_dump())
+
+	if isinstance(outcome, DraftDegraded):
+		return JSONResponse(
+			status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+			content={"detail": "AI is temporarily unavailable; please reply manually.",
+			         "degraded": True, "reason": outcome.reason},
+			headers={"Retry-After": "30"},
+		)
+
+	if isinstance(outcome, DraftSchemaInvalid):
+		return JSONResponse(
+			status_code=status.HTTP_502_BAD_GATEWAY,
+			content={"detail": "the AI model returned an unexpected format.", "errors": list(outcome.errors)},
+		)
+
+	raise AssertionError(f"unhandled draft-reply outcome: {type(outcome).__name__}")  # pragma: no cover
 
 
 @router.post(
@@ -452,6 +492,7 @@ __all__ = (
 	"classify_intent",
 	"draft_email",
 	"draft_note",
+	"draft_reply",
 	"draft_recommendation",
 	"draft_renewal",
 	"extract_sov",
