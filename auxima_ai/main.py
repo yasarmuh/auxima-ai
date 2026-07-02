@@ -25,6 +25,7 @@ from fastapi import FastAPI
 
 from auxima_ai import __version__
 from auxima_ai.assist.router import router as assist_router
+from auxima_ai.claims.intake_router import router as fnol_intake_router
 from auxima_ai.claims.router import router as claims_router
 from auxima_ai.auth_select import select_auth_middleware
 from auxima_ai.auth_whoami import router as whoami_router
@@ -92,6 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(quote_router)
     app.include_router(assist_router)
     app.include_router(claims_router)
+    app.include_router(fnol_intake_router)
     app.include_router(whoami_router)
 
     @app.get("/healthz")

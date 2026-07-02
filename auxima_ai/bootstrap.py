@@ -30,6 +30,8 @@ from auxima_ai.activity.http_emitter import HTTPActivityEmitter
 from auxima_ai.assist.openrouter import OpenRouterError, OpenRouterLLMCaller
 from auxima_ai.assist.router import set_assist_service
 from auxima_ai.assist.service import AssistService, ProviderStep
+from auxima_ai.claims.intake import FNOLIntakeService
+from auxima_ai.claims.intake_router import set_fnol_intake_service
 from auxima_ai.claims.router import set_claims_service
 from auxima_ai.claims.service import ClaimsCrewService
 from auxima_ai.config import Settings, get_settings
@@ -188,7 +190,11 @@ def bootstrap_app(settings: Settings | None = None) -> IntakeService:
     set_assist_service(assist)
     # ClaimsCrew (P3-01): reuses the assist invoke chain — tier gate, rate limit, ceiling,
     # redaction and AI-Run-Log all apply; the crew adds the LangGraph FNOL state machine on top.
-    set_claims_service(ClaimsCrewService(invoke=assist._invoke))
+    claims = ClaimsCrewService(invoke=assist._invoke)
+    set_claims_service(claims)
+    # Multi-turn FNOL intake (P3-01c): checkpointed graph in front of the same crew; the
+    # LLM extract step rides the identical invoke chain (local_only pinned in the service).
+    set_fnol_intake_service(FNOLIntakeService(claims=claims, invoke=assist._invoke))
     return service
 
 
