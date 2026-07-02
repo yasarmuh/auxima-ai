@@ -46,10 +46,20 @@ _RELATIVE_DAYS = {"yesterday": 1, "أمس": 1, "امس": 1, "today": 0, "الي�
 
 _NUMBER = r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?"
 _CURRENCY = r"(?:SAR|ر\.س|ريال|riyals?)"
+# Word magnitudes ("20 thousand riyals" / "٢٠ ألف ريال") are deterministic territory —
+# a live 0.5B model garbled "20 thousand" into 200000; money never comes from the LLM.
+_MAGNITUDE_WORDS = {
+	"thousand": Decimal("1000"), "ألف": Decimal("1000"), "الف": Decimal("1000"),
+	"million": Decimal("1000000"), "مليون": Decimal("1000000"),
+}
+_MAGNITUDE = r"(?:thousand|million|ألف|الف|مليون)"
 _MARKED_AMOUNT = re.compile(
-	rf"(?:{_CURRENCY}\s*({_NUMBER}))|(?:({_NUMBER})\s*{_CURRENCY})", re.IGNORECASE
+	rf"(?:{_CURRENCY}\s*({_NUMBER})(?:\s+({_MAGNITUDE}))?)"
+	rf"|(?:({_NUMBER})(?:\s+({_MAGNITUDE}))?\s*{_CURRENCY})",
+	re.IGNORECASE,
 )
 _SUFFIXED_AMOUNT = re.compile(rf"\b({_NUMBER})\s*([km])\b", re.IGNORECASE)
+_WORD_MAGNITUDE_AMOUNT = re.compile(rf"\b({_NUMBER})\s+({_MAGNITUDE})\b", re.IGNORECASE)
 _BARE_AMOUNT = re.compile(rf"\b({_NUMBER})\b")
 
 _SKIP_TOKENS = frozenset({"skip", "unknown", "n/a", "لا أعرف", "لا اعرف", "غير معروف"})
@@ -113,20 +123,28 @@ def _parse_number(raw: str) -> Decimal | None:
 
 def extract_amount(text: str, *, assume_amount: bool = False) -> str | None:
 	"""Loss amount from free text. A number counts only when currency-marked (SAR/ريال/ر.س)
-	or magnitude-suffixed (50k/1.2m) — a bare number could be a plate or CR number. Pass
-	``assume_amount=True`` only when the intake JUST asked for the amount."""
+	or magnitude-marked (50k/1.2m/"20 thousand"/"٢٠ ألف") — a bare number could be a plate
+	or CR number. Pass ``assume_amount=True`` only when the intake JUST asked for the amount."""
 	normalized = _normalize(text)
 	if m := _MARKED_AMOUNT.search(normalized):
-		value = _parse_number(m[1] or m[2])
-		return _format_amount(value) if value is not None else None
+		value = _parse_number(m[1] or m[3])
+		if value is not None:
+			word = (m[2] or m[4] or "").lower()
+			return _format_amount(value * _MAGNITUDE_WORDS.get(word, Decimal("1")))
+		return None
 	if m := _SUFFIXED_AMOUNT.search(normalized):
 		value = _parse_number(m[1])
 		if value is not None:
 			multiplier = Decimal("1000") if m[2].lower() == "k" else Decimal("1000000")
 			return _format_amount(value * multiplier)
-	if assume_amount and (m := _BARE_AMOUNT.search(normalized)):
-		value = _parse_number(m[1])
-		return _format_amount(value) if value is not None else None
+	if assume_amount:
+		if m := _WORD_MAGNITUDE_AMOUNT.search(normalized):
+			value = _parse_number(m[1])
+			if value is not None:
+				return _format_amount(value * _MAGNITUDE_WORDS[m[2].lower()])
+		if m := _BARE_AMOUNT.search(normalized):
+			value = _parse_number(m[1])
+			return _format_amount(value) if value is not None else None
 	return None
 
 

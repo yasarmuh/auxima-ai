@@ -80,6 +80,16 @@ class TestAmount:
 		assert extract_amount("roughly 50k in damages") == "50000"
 		assert extract_amount("could reach 1.2m") == "1200000"
 
+	def test_word_magnitudes(self):
+		# live 2026-07-02: a 0.5B model turned "20 thousand riyals" into 200000 — prose
+		# magnitudes must be DETERMINISTIC territory, the LLM never supplies money
+		assert extract_amount("damage maybe 20 thousand riyals") == "20000"
+		assert extract_amount("could be 1.5 million SAR") == "1500000"
+		assert extract_amount("الخسارة حوالي 20 ألف ريال") == "20000"
+		assert extract_amount("قد تصل إلى 2 مليون ريال") == "2000000"
+		assert extract_amount("20 thousand") is None, "word magnitude still needs a currency marker"
+		assert extract_amount("20 thousand", assume_amount=True) == "20000"
+
 	def test_arabic_indic_digits(self):
 		assert extract_amount("٥٠٠٠ ريال تقريبا") == "5000"
 

@@ -168,22 +168,24 @@ class FNOLIntakeService:
 			elif amount := extract_amount(message, assume_amount=asked):
 				update["estimated_amount"] = amount
 
-		# 3) LLM extract (recall) — ONLY for what is still missing, local_only ALWAYS
-		missing = [
-			f for f in _FIELD_ORDER
-			if not have(f) and not (f == "estimated_amount" and update.get("amount_skipped"))
+		# 3) LLM extract (recall) — ONLY for what is still missing, local_only ALWAYS.
+		#    Money is NEVER an LLM field: a live 0.5B model garbled "20 thousand riyals"
+		#    into 200000 — magnitude-wrong money that passes shape validation. The
+		#    deterministic extractor owns amounts; the reporter is re-asked otherwise.
+		llm_fields = [
+			f for f in _FIELD_ORDER if f != "estimated_amount" and not have(f)
 		]
-		if missing and self.invoke is not None:
+		if llm_fields and self.invoke is not None:
 			try:
 				response = self.invoke(
 					tenant_id=state["tenant_id"], model_id=self.model_id,
 					prompt=build_fnol_extract_prompt(
-						message=message, missing=missing, today=state["turn_today"],
+						message=message, missing=llm_fields, today=state["turn_today"],
 					),
 					local_only=True,
 				)
 				for f, value in validate_extract_payload(response.payload, today=today).items():
-					if f in missing:
+					if f in llm_fields:
 						update[f] = value
 			except Exception as e:  # noqa: BLE001 — ANY extract failure degrades, never crashes
 				logger.warning(

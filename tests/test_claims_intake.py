@@ -219,22 +219,45 @@ class TestLLMExtract:
 		assert out.status == "collecting"
 		assert out.degraded is True
 
-	def test_llm_float_amount_is_decimal_normalized(self):
-		# a JSON number materialises as a Python float — the stored value must be the
-		# validated Decimal's string, never the raw float repr (money is Decimal, never float)
+	def test_llm_never_supplies_money(self):
+		# live 2026-07-02: the 0.5B model garbled "20 thousand riyals" into 200000 — a
+		# 10x-wrong MONEY value that passes shape validation. Money is deterministic-only:
+		# the LLM is not even asked for estimated_amount, and a payload carrying one is dropped.
+		calls = []
+
 		def invoke(**kw):
+			calls.append(kw)
 			return LLMResponse(
-				payload={"estimated_amount": 1500.5},
+				payload={"loss_type": "motor", "estimated_amount": "200000"},
 				prompt_tokens=1, completion_tokens=1, latency_ms=1,
 			)
 
-		svc, claims = _service(invoke=invoke)
+		svc, _claims = _service(invoke=invoke)
 		out = svc.turn(_turn(
-			message="no numbers in prose",
+			message="my Toyota was damaged, twenty thousand riyals or so",
+			fields=ProvidedFields(incident_date="2026-06-28"),
+		))
+		assert out.status == "collecting"
+		assert out.missing == ["estimated_amount"], "amount stays open for the reporter"
+		assert out.collected["loss_type"] == "motor", "LLM recall still fills loss_type"
+		assert out.collected.get("estimated_amount") is None, "LLM money is dropped"
+		assert calls and "estimated_amount" not in calls[0]["prompt"], (
+			"the LLM is not asked for money"
+		)
+
+	def test_llm_not_called_when_only_amount_missing(self):
+		calls = []
+
+		def invoke(**kw):
+			calls.append(kw)
+			return LLMResponse(payload={}, prompt_tokens=1, completion_tokens=1, latency_ms=1)
+
+		svc, _claims = _service(invoke=invoke)
+		svc.turn(_turn(
+			message="hello",
 			fields=ProvidedFields(loss_type="motor", incident_date="2026-06-28"),
 		))
-		assert out.status == "processed"
-		assert claims.requests[0].estimated_amount == "1500.5"
+		assert calls == [], "money is not an LLM field — nothing left to ask the LLM"
 
 	def test_llm_garbage_payload_is_dropped(self):
 		def invoke(**kw):
