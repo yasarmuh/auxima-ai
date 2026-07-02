@@ -20,7 +20,7 @@ def _classes(svc) -> list[str]:
 def test_ollama_only_when_no_openrouter_key(monkeypatch):
 	monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 	svc = build_assist_service(_settings())
-	assert _models(svc) == ["llama3.2:1b"]  # cloud step skipped, Ollama only
+	assert _models(svc) == ["qwen2.5:0.5b"]  # cloud step skipped, Ollama only
 	assert _classes(svc) == ["self-hosted"]
 	assert svc.enforcer is not None  # policy gate wired
 
@@ -29,7 +29,7 @@ def test_ollama_FIRST_when_key_present(monkeypatch):
 	"""CLAUDE §2: self-hosted is the default — Ollama precedes the cloud step."""
 	monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
 	svc = build_assist_service(_settings())
-	assert _models(svc) == ["llama3.2:1b", "google/gemma-4-31b-it:free"]
+	assert _models(svc) == ["qwen2.5:0.5b", "google/gemma-4-31b-it:free"]
 	assert _classes(svc) == ["self-hosted", "free-cloud"]
 
 

@@ -102,9 +102,12 @@ class Settings(BaseSettings):
     # OpenRouterLLMCaller (not duplicated here); if it is unset, the OpenRouter
     # step is skipped and only the local Ollama step is wired.
     assist_openrouter_model: str = "google/gemma-4-31b-it:free"
-    # The local Ollama model used as the reliable fallback. llama3.2:1b is the
-    # fast-on-CPU default for dev; point this at a 7B/GPU model in prod.
-    assist_ollama_model: str = "llama3.2:1b"
+    # The local Ollama model used as the reliable fallback. qwen2.5:0.5b is the
+    # fast-on-CPU dev default (benchmarked 2026-07-02 on the real extract/triage
+    # prompts vs llama3.2:1b and qwen3:0.6b: best accuracy incl. Arabic, 1/3 the
+    # size, fits a 2GB GPU; qwen3:0.6b emitted broken JSON under format=json).
+    # Point this at a 7B/GPU model in prod.
+    assist_ollama_model: str = "qwen2.5:0.5b"
     # Generation can be slow on CPU; assist gets its own (larger) timeout.
     assist_ollama_timeout_s: float = 120.0
 

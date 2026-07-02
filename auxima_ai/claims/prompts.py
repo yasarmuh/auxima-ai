@@ -48,15 +48,29 @@ def validate_triage_response(payload: Any) -> TriageAssessment:
 
 def build_fnol_extract_prompt(*, message: str, missing: list[str], today: str) -> str:
 	"""Extraction prompt for the multi-turn intake (P3-01c). Carries the reporter's message
-	VERBATIM — may contain health data/PII, which is why the intake pins local_only=True."""
+	VERBATIM — may contain health data/PII, which is why the intake pins local_only=True.
+
+	Hardened for small models (0.5B-tier benchmark, 2026-07-02): the explicit return-{} rule
+	plus one-shot examples stopped qwen2.5:0.5b from inventing fields on an empty message —
+	without them every sub-1B candidate padded all three fields with plausible values."""
 	return (
-		"You extract structured fields from an insurance First-Notice-of-Loss message\n"
-		"(English or Arabic). Reply with ONLY a JSON object containing AT MOST these keys,\n"
-		f"and only when the message clearly states them: {', '.join(missing)}.\n"
-		'Shapes: "loss_type" one of motor|property|medical|liability|marine|engineering|other;\n'
-		'"incident_date" ISO yyyy-mm-dd (resolve relative words against today given below);\n'
-		'"estimated_amount" a plain decimal number in SAR.\n'
-		"Omit any field the message does not state. Do not invent values. Do not add fields.\n\n"
+		"You extract fields from an insurance First-Notice-of-Loss message (English or "
+		"Arabic).\n"
+		"Reply with ONLY a JSON object. Rules:\n"
+		f"- Allowed keys (include a key ONLY if the message clearly states it): "
+		f"{', '.join(missing)}\n"
+		'- "loss_type": one of motor|property|medical|liability|marine|engineering|other\n'
+		'- "incident_date": ISO yyyy-mm-dd; resolve relative words like "yesterday" against '
+		"today\n"
+		'- "estimated_amount": plain decimal number in SAR\n'
+		"- If the message does not clearly state a field, DO NOT include that key.\n"
+		"- If nothing is clearly stated, reply with exactly {}\n"
+		"- Never guess. An empty object is a correct answer.\n\n"
+		"Example 1 message: 'my car was hit yesterday, maybe 5000 riyals'\n"
+		'Example 1 reply: {"loss_type": "motor", "incident_date": "<resolved yesterday>", '
+		'"estimated_amount": "5000"}\n'
+		"Example 2 message: 'something happened, details later'\n"
+		"Example 2 reply: {}\n\n"
 		f"today: {today}\n"
 		f"message: {message}\n"
 	)
@@ -64,15 +78,22 @@ def build_fnol_extract_prompt(*, message: str, missing: list[str], today: str) -
 
 def validate_extract_payload(payload: Any, *, today: date) -> dict[str, str]:
 	"""Per-field validation of the extract payload — invalid values are DROPPED, not fatal
-	(a hallucinated date must not kill a correctly extracted loss_type). Non-dict raises."""
+	(a hallucinated date must not kill a correctly extracted loss_type). Non-dict raises.
+
+	Padding guards (small-model benchmark, 2026-07-02): an LLM "other" loss type and an LLM
+	incident_date equal to TODAY are dropped as indistinguishable-from-padding — the
+	deterministic extractor already catches a reporter literally answering "other"/"أخرى"
+	or saying "today"/"اليوم" BEFORE the LLM is asked, so from the LLM these values are
+	almost surely invented. Cost of a false drop = one re-ask; cost of a false accept = a
+	fabricated fact in the FNOL."""
 	if not isinstance(payload, dict):
 		raise ValueError(f"extract payload must be a JSON object; got {type(payload).__name__}")
 	valid: dict[str, str] = {}
-	if payload.get("loss_type") in LOSS_TYPES:
+	if payload.get("loss_type") in LOSS_TYPES and payload["loss_type"] != "other":
 		valid["loss_type"] = payload["loss_type"]
 	if isinstance(payload.get("incident_date"), str):
 		try:
-			if date.fromisoformat(payload["incident_date"]) <= today:
+			if date.fromisoformat(payload["incident_date"]) < today:
 				valid["incident_date"] = payload["incident_date"]
 		except ValueError:
 			pass  # dropped: not a date

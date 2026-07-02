@@ -248,3 +248,21 @@ class TestLLMExtract:
 		assert out.status == "collecting"
 		assert out.collected.get("loss_type") is None
 		assert out.collected.get("incident_date") is None
+
+	def test_llm_padding_values_are_dropped(self):
+		# small-model benchmark 2026-07-02: on partial messages the LLM pads loss_type
+		# "other" and TODAY's date — both indistinguishable from padding (a genuine "other"
+		# reply and a genuine "today" mention are caught by the DETERMINISTIC extractor
+		# before the LLM is asked), so the validator drops them and the intake re-asks.
+		def invoke(**kw):
+			return LLMResponse(
+				payload={"loss_type": "other", "incident_date": TODAY},
+				prompt_tokens=1, completion_tokens=1, latency_ms=1,
+			)
+
+		svc, _claims = _service(invoke=invoke)
+		out = svc.turn(_turn(message="the total damage is around SAR 75,000"))
+		assert out.status == "collecting"
+		assert out.collected.get("loss_type") is None, "LLM 'other' = padding, re-ask"
+		assert out.collected.get("incident_date") is None, "LLM today-date = padding, re-ask"
+		assert out.collected["estimated_amount"] == "75000", "deterministic amount still lands"
