@@ -115,9 +115,12 @@ def test_over_ceiling_with_local_down_degrades():
 	ledger = InMemoryCostLedger()
 	ledger.set_ceiling("t1", Decimal("100"))
 	from auxima_ai.cost.ledger import LedgerEntry
+	# wording_diff() checks the ceiling against the REAL clock (no now= plumbing), so the
+	# seed must land in the real current month — a fixed ts broke this test on 2026-07-01.
 	ledger.try_spend(LedgerEntry(
 		tenant_id="t1", provider="openrouter", model="x", model_version="v",
-		prompt_tokens=1, completion_tokens=1, latency_ms=1, cost=Decimal("100"), ts=_NOW,
+		prompt_tokens=1, completion_tokens=1, latency_ms=1, cost=Decimal("100"),
+		ts=datetime.now(timezone.utc),
 	))
 	local, cloud = _Caller(_WORDING_PAYLOAD, fail=True), _Caller(_WORDING_PAYLOAD)
 	svc = AssistService(enforcer=_enforcer(ledger=ledger), steps=_steps(local, cloud))
